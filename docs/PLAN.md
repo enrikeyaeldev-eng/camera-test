@@ -1,6 +1,8 @@
 # Galaxy A56 Camera App — Build Plan
 
-As of Oct 16, 2026. Source of truth for Claude Code. The owner also keeps an editable copy as a Claude doc.
+As of Oct 17, 2026. Source of truth for Claude Code. The owner also keeps an editable copy as a Claude doc.
+
+> **Project status: closed (Oct 17, 2026).** All six phases are built or deliberately skipped (Phase 2: the A56 offers no Night or HDR extension). The last build adds background merging, GPU merging, frames from before the shutter press and zoom. Open ideas are kept under "Ideas for later" for a possible restart, together with the move to the `CameraA56` repository.
 
 ## Summary
 
@@ -210,7 +212,7 @@ Status (Oct 17, 2026): built and passing CI (with unit tests for orientation, ta
 
 ### Phase 3: Burst stacking, first version
 
-- [ ] Frame ring buffer in native memory, fed by a repeating full-size YUV request, so frames from just before the shutter press can be used. *Deferred:* frames are captured after the press instead. Pre-press frames would be at auto exposure, not the darker, locked exposure the merge needs, and copying 30 full frames a second costs heat. Revisit once results are judged.
+- [x] Frame ring buffer fed by a repeating full-size YUV request, so frames from just before the shutter press can be used. (The last 3 preview frames stay in the ImageReader, no copying, with their exposure from the capture results. They are brightness-matched to the darker burst in linear light, tiles they had clipped get no weight, and the reference is always a burst frame; the burst takes 3 fewer frames after the press. Host test: 2 pre-press frames cut noise 23 % with highlights intact. Burst frames are matched by sensor timestamp so stray preview frames are never merged. Setting: on by default.)
 - [x] On shutter: lock AE and AWB, take N frames (start with 8), underexposed by about 1 EV to protect highlights. (Manual exposure per frame, from the preview's auto exposure; camera NR and sharpening off.)
 - [x] Pick the sharpest frame as reference, measured by gradient energy. (Noise-floor-corrected, weaker-direction, 75th-percentile block energy, so noise and a single moving object don't decide.)
 - [x] Align the others with a coarse-to-fine tile search on a luma pyramid, as in Google's published HDR+ approach. (5 levels, 16 px tiles, parent and neighbour candidates; integer-pixel.)
@@ -224,19 +226,20 @@ Status (Oct 17, 2026): built, waiting for the owner's phone test. Host tests on 
 
 ### Phase 4: Night and HDR modes of our own
 
-- [x] Night: more frames (12 to 20), longer exposures if Phase 0 shows manual exposure works, motion-aware frame rejection. (8/12/16 frames, up to 1/10 s at the lowest ISO that keeps -0.5 EV; frames under 70 % of the sharpest are dropped.)
-- [x] HDR: bracketed frames merged with exposure fusion. (-2, 0, +1.5 EV; brightness-matched alignment; Mertens fusion on a Laplacian pyramid.)
+- [x] Night: more frames (12 to 20), longer exposures if Phase 0 shows manual exposure works, motion-aware frame rejection. (8/12/16 frames at -0.5 EV; the exposure grows only until ISO 200, at most 1/10 s, so lit rooms do not blur; frames under 70 % of the sharpest are dropped.)
+- [x] HDR: bracketed frames merged with exposure fusion. (Built as -2/0/+1.5 EV Mertens fusion, then replaced after the owner's test by the HDR+ approach: 10 identical frames at -2 EV merged like Stack, 4× shadow lift with local tone mapping. The fusion code stays in the native core, tested.)
 - [x] Linear DNG writer for Lightroom; Ultra HDR JPEG if supported. (LinearRaw DNG with sRGB colour matrix and BaselineExposure; Ultra HDR is not supported by the camera, per Phase 0.)
 
 **Done when:** in low light the result beats the single frame and is competitive with the stock Night mode on noise.
 
-Status (Oct 17, 2026): built, waiting for the owner's phone test.
+Status (Oct 17, 2026): built and tested by the owner indoors (backlit and front-lit selfies, tuned against Samsung shots). A dark-room comparison with the stock Night mode was not done before the project closed.
 
 ### Phase 5: Polish
 
 - [x] Manual focus, white balance and EV controls; grid; timer; volume-key shutter. (Volume, camera, Enter and media keys, so most Bluetooth remotes work too.)
-- [ ] Background processing so the camera is ready for the next shot. *Open:* the preview stays live while merging, but the shutter waits for the merge to finish.
-- [ ] GPU acceleration of the merge if speed or heat is a problem. *Not needed yet:* the merge is multithreaded C++; decide after phone timings.
+- [x] Background processing so the camera is ready for the next shot. (Captured bursts are merged on one background thread; the shutter is free right after capture, up to 2 bursts queued, about 300 MB each; the thumbnail shows a spinner.)
+- [x] GPU acceleration of the merge if speed or heat is a problem. (OpenGL ES 3.1 compute for the tile mismatch and weighted accumulation; same result as the CPU to 0.0001 levels on Mesa in CI. A self-test against the CPU runs at start; any failure falls back to the CPU. Setting: on by default. Phone timings: `engine` and `mergeMs` in the logs.)
+- [x] Zoom. (Pinch to zoom and a 2x chip next to the lens chips, through CONTROL_ZOOM_RATIO for preview, Photo and bursts.)
 
 ## Known issues
 
@@ -250,4 +253,50 @@ Status (Oct 17, 2026): built, waiting for the owner's phone test.
 - **Build 21 look tuning (Oct 17), against a Samsung shot of a backlit selfie (lamp behind the subject).** Measurements showed our faces were as bright as Samsung's, but the global Reinhard curve darkened midtones 15–50 % (grey walls and shirt), the lamp was blown, and skin was too red (R−G 50 vs 27). Changes to the Bright look: local tone mapping (fast guided filter on log luma, 16 px cells: areas below 0.3 lifted up to 1 stop, areas above 0.25 held back by at most the burst's headroom, log2(gain), so clipped lamps stay a white glow instead of turning grey); a global curve that stays linear up to 0.4 with a shoulder reaching white at the gain; saturation 0.92; WB pull 50 %. Tuned offline on the owner's debug frames (HDR, Stack, Night). Tried and dropped: per-pixel and per-area protection of clipped highlights, which made hard-edged white blobs.
 - **Build 23 tuning (Oct 17), front-lit selfie on the front 1.2x camera vs the Samsung shot.** Build 22 made front-lit scenes flat: faces over-lifted (cheek 173 vs Samsung 113), marble walls grey (163 vs 182), and the white shirt blue (B 205 > R 191) because grey-world WB over the warm wall over-corrected. Changes: lift 40 % below 0.3, hold back 60 % above 0.45; the bright look sits ¼ stop under auto (only where the burst has headroom); saturation 0.82; WB from bright near-neutral pixels (Y 170–235, chroma < 12), 70 % pulled. Result: cheek 154, wall 180/168/155, shirt neutral; the backlit lamp scene keeps the face at Samsung's level (132).
 - **Night blur fix (build 23).** In a lit room Night chose 88 ms at ISO 40; 6 of 16 hand-held selfie frames were rejected and the rest smeared the marble. Night now lengthens the exposure only until ISO 200 (never below auto, at most 100 ms).
-- **Next (owner request):** make the lamp look like the owner's Lightroom edit of the Samsung shot: about 0.7 stops darker overall, lampshade a warm cream (~204) with visible texture, a warm glow on the wall.
+
+## Ideas for later (not scheduled)
+
+Kept for a possible restart of the project (closed Oct 17, 2026).
+
+- **Video recording.** The roadmap is stills-only so far. Phase 0 shows 1280 × 720 high-speed video up to 240 fps on the back main camera, no video stabilisation mode (OIS only), and full-size YUV at 30 fps. A basic video mode (MediaRecorder or MediaCodec on a Camera2 session, with the same AE/AWB locks) fits naturally after Phase 1. Stacked or denoised video is a much larger project.
+- **Bluetooth remote shutter.** Done through the Phase 5 key handling: volume, camera, Enter and media keys trigger the shutter, which covers remotes that act as a keyboard or media button. Still to test with the owner's remote. Only if a remote needs its own protocol: BLE (Bluetooth permissions, pairing UI), as a separate task.
+
+- **Moving to the CameraA56 repository.** The owner created `enrikeyaeldev-eng/CameraA56` as the follow-up home of this project. Work stays in `camera-test` until the app is finished, then the move is reconsidered. Moving needs the same four signing secrets re-added there from the owner's private keystore backup (never a new key), and the download link changes.
+- **Warm lamp look.** The owner's Lightroom edit of the Samsung backlit shot: about 0.7 stops darker overall, the lampshade a warm cream (~204) with visible texture, a warm glow on the wall. Our frames show the shade as neutral white (the camera's white balance neutralises the lamp), so the warmth must be added as a look (warming the brightest areas, like split toning); darkening the whole picture made the shirt muddy.
+- **Finer detail.** Samsung's shots still show crisper marble veins and hair. Candidates: sub-pixel alignment and a merge that keeps more detail (HDR+'s frequency-domain merge), then sharpening tuned on the merged image.
+- **Dark-room Night test** against the stock Night mode, the one Phase 4 "done when" check not yet made.
+- **Phone timings for the GPU merge** (`engine` and `mergeMs` in the logs) and the battery cost of keeping full-size preview frames for the pre-shutter ring.
+
+## Risks, effort and skills
+
+The biggest risk is that the finished app does not clearly beat Samsung's own camera, which processes the sensor's RAW data internally. Realistic wins are less noise in dim scenes, a less oversharpened look, and files with more headroom for Lightroom.
+
+| Risk | Likelihood | Mitigation |
+| --- | --- | --- |
+| Stacked YUV not clearly better than the stock app in daylight | High | Judge success on low light and natural look, not daylight |
+| Full-size burst too slow for stacking | Medium | Stack fewer frames or at a lower size; rely on Extensions |
+| No Camera Extensions on the A56 | Confirmed: only FACE_RETOUCH and BOKEH | Phase 2 is skipped; no other work depends on it |
+| Manual exposure ignored (LIMITED device) | Medium | Bracket with exposure compensation instead |
+| Ultrawide and macro unreachable | Resolved for the ultrawide (ID 2, Phase 0); no macro found | Ultrawide can be offered as a second back camera |
+| Memory pressure or heat during merges | Medium | Native buffers, fewer frames, GPU path in Phase 5 |
+| One UI update changes camera behaviour | Low to medium | Re-run the diagnostic report after each major update |
+| Ghosting on moving subjects | High at first | Robust merge with tile rejection; fewer frames for moving scenes |
+
+**Effort, with Claude Code doing most of the coding.** Phase 0: a few sessions. Phases 1 and 2: one to two weeks of evenings. Phase 3: several weeks, mostly testing and tuning on real scenes. Phase 4 onward: open-ended. Image-quality tuning takes far longer than writing the code.
+
+**Skills the owner needs.** Reading Kotlin well enough to review changes; basic Git; patience to shoot the same test scenes repeatedly and compare results carefully. Helpful but learnable along the way: image-processing basics (noise, dynamic range, alignment) and how to read a crash log.
+
+## Rules for Claude Code
+
+Work one phase at a time, keep `main` always installable, and stop at every phase boundary for the owner to test on the phone.
+
+- Read `docs/PLAN.md` before each session and tick tasks off in it as they are completed.
+- Small commits with clear messages; push to `main` only when `./gradlew assembleDebug` succeeds in the Codespace (or, if the SDK cannot be installed there, when the GitHub Actions build passes on the branch).
+- Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): summary`, with types `feat`, `fix`, `docs`, `build`, `ci`, `refactor`, `test`, `chore` and scopes such as `app`, `camera`, `processing`, `diagnostics`. Work directly on `main`; do not create feature branches.
+- Never commit build output, keystores, passwords or `local.properties`. Never ask the owner to paste credentials into a chat.
+- Never assume a camera feature exists: check `CameraCharacteristics` at runtime and degrade gracefully, logging what was missing.
+- All camera work on a dedicated background thread; never block the UI thread; close cameras and sessions in `onPause`.
+- Copy frames out of `Image` objects immediately and close them; never hold more than the `ImageReader` limit.
+- No GPL code (for example Open Camera). Permissive licences only (Apache 2.0, MIT, BSD), recorded in a `THIRD_PARTY.md` file.
+- Log every camera error with the camera ID and request settings, under the log tag `A56Cam`.
+- At the end of each phase, report: what was built, the release link, what the owner should test on the phone, and anything that did not work.
