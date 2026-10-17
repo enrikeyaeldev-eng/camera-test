@@ -20,7 +20,8 @@ internal object StackNative {
         u: ByteBuffer, v: ByteBuffer, uvRowStride: Int, uvPixelStride: Int,
         timestamp: Long, exposure: Double,
     ): Boolean
-    external fun process(handle: Long, minSharpness: Float, hdr: Boolean): String?
+    external fun process(handle: Long, minSharpness: Float, hdr: Boolean, useGpu: Boolean): String?
+    external fun gpuStatus(): String
     external fun tileWeights(handle: Long): FloatArray
     external fun outputSize(handle: Long, rotation: Int): IntArray
     external fun renderBitmap(handle: Long, bitmap: Bitmap, gain: Float, sharpen: Float, rotation: Int, look: Int): Boolean
@@ -38,6 +39,8 @@ class StackStats(val json: JSONObject) {
     val alignMs: Int get() = json.optInt("alignMs")
     val mergeMs: Int get() = json.optInt("mergeMs")
     val rejected: Int get() = json.optJSONArray("rejected")?.length() ?: 0
+    /** "gpu" or "cpu". */
+    val engine: String get() = json.optString("engine", "cpu")
 }
 
 /**
@@ -66,8 +69,9 @@ class StackProcessor(val width: Int, val height: Int, capacity: Int) : AutoClose
     /** NV21 copy of a captured frame, for debug output; only before [process]. */
     fun frameNv21(index: Int): ByteArray? = StackNative.frameNv21(live(), index)
 
-    fun process(minSharpness: Float, hdr: Boolean): StackStats {
-        val json = StackNative.process(live(), minSharpness, hdr) ?: throw IllegalStateException("Stack processing failed")
+    /** [useGpu]: merge on the GPU when it passed its self-test (see [gpuStatus]); the CPU otherwise. */
+    fun process(minSharpness: Float, hdr: Boolean, useGpu: Boolean = true): StackStats {
+        val json = StackNative.process(live(), minSharpness, hdr, useGpu) ?: throw IllegalStateException("Stack processing failed")
         return StackStats(JSONObject(json))
     }
 
@@ -92,6 +96,14 @@ class StackProcessor(val width: Int, val height: Int, capacity: Int) : AutoClose
     private fun live(): Long {
         check(handle != 0L) { "StackProcessor already closed" }
         return handle
+    }
+
+    companion object {
+        /**
+         * Sets up the GPU merge on first call (a small CPU-vs-GPU comparison, about a second) and describes
+         * the result. Call it off the main thread, before the first merge.
+         */
+        fun gpuStatus(): String = StackNative.gpuStatus()
     }
 
     override fun close() {

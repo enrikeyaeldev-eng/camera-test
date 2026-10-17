@@ -5,8 +5,10 @@
 
 #include <cstdio>
 #include <memory>
+#include <mutex>
 #include <string>
 
+#include "gpu_merge.h"
 #include "stack.h"
 
 #define LOG_TAG "A56Cam"
@@ -21,6 +23,30 @@ struct Handle {
 };
 
 Handle* from(jlong h) { return reinterpret_cast<Handle*>(h); }
+
+// The GPU merger is created and self-tested once per process; null when the GPU is unusable.
+std::mutex gpuMutex;
+std::unique_ptr<a56::GpuMerger> gpu;
+bool gpuChecked = false;
+std::string gpuReport;
+
+a56::GpuMerger* gpuMerger() {
+    std::lock_guard<std::mutex> lock(gpuMutex);
+    if (!gpuChecked) {
+        gpuChecked = true;
+        std::string error;
+        gpu = a56::GpuMerger::create(&error);
+        if (!gpu) {
+            gpuReport = "GPU merge unavailable: " + error;
+        } else if (!a56::gpuSelfTest(*gpu, &gpuReport)) {
+            gpuReport = "GPU merge disabled, self-test failed: " + gpuReport;
+            gpu.reset();
+        } else {
+            gpuReport = "GPU merge ready: " + gpuReport;
+        }
+    }
+    return gpu.get();
+}
 
 // True when a plane of the given geometry fits inside the direct buffer.
 bool fits(JNIEnv* env, jobject buf, int rows, int cols, int rowStride, int pixelStride) {
@@ -62,6 +88,14 @@ void appendArray(std::string& out, const char* name, const std::vector<T>& v) {
 }  // namespace
 
 extern "C" {
+
+// Creates the GPU merger on first use (with a CPU comparison) and describes the outcome.
+JNIEXPORT jstring JNICALL
+Java_com_a56cam_processing_StackNative_gpuStatus(JNIEnv* env, jobject) {
+    gpuMerger();
+    std::lock_guard<std::mutex> lock(gpuMutex);
+    return env->NewStringUTF(gpuReport.c_str());
+}
 
 JNIEXPORT jlong JNICALL
 Java_com_a56cam_processing_StackNative_create(JNIEnv*, jobject, jint w, jint h, jint capacity) {
@@ -109,12 +143,14 @@ Java_com_a56cam_processing_StackNative_addFrame(JNIEnv* env, jobject, jlong h, j
 
 // Returns stats as JSON, or null on failure.
 JNIEXPORT jstring JNICALL
-Java_com_a56cam_processing_StackNative_process(JNIEnv* env, jobject, jlong h, jfloat minSharpness, jboolean hdr) {
+Java_com_a56cam_processing_StackNative_process(JNIEnv* env, jobject, jlong h, jfloat minSharpness, jboolean hdr,
+                                               jboolean useGpu) {
     Handle* hd = from(h);
     try {
         a56::ProcessParams p;
         p.minSharpness = minSharpness;
         p.hdr = hdr == JNI_TRUE;
+        if (useGpu == JNI_TRUE) p.accelerator = gpuMerger();
         hd->stats = hd->stack.process(p);
     } catch (const std::exception& e) {
         LOGE("process failed: %s", e.what());
@@ -134,7 +170,7 @@ Java_com_a56cam_processing_StackNative_process(JNIEnv* env, jobject, jlong h, jf
     appendArray(out, "medianDy", s.medianDy);
     out += ",";
     appendArray(out, "rejected", s.rejected);
-    out += "}";
+    out += ",\"engine\":\"" + s.engine + "\"}";
     return env->NewStringUTF(out.c_str());
 }
 

@@ -544,36 +544,57 @@ StackStats Stack::process(const ProcessParams& params) {
     if (params.hdr && n > 1) {
         fuseExposures(al, st);
     } else {
-        mergeRobust(al, st.rejected, st);
+        mergeRobust(al, st.rejected, st, params.accelerator);
     }
     st.mergeMs = nowMs() - t1;
     std::vector<Frame>().swap(frames_);
     return st;
 }
 
-void Stack::mergeRobust(const Alignment& al, const std::vector<int>& rejected, StackStats& st) {
+void Stack::mergeRobust(const Alignment& al, const std::vector<int>& rejected, StackStats& st, MergeAccelerator* accel) {
     const int n = al.n, ref = al.ref, W = width_, H = height_, CW = W / 2, CH = H / 2;
     const int M = kMergeTile, S = kMergeStep;
     const int mtx = W / S + 2, mty = H / S + 2;
+    const size_t tiles = static_cast<size_t>(mtx) * mty;
     st.tilesX = mtx;
     st.tilesY = mty;
     auto shiftOf = [&](int i) {
         return [&al, i](int tx, int ty) { return al.at(i, tx * kMergeStep, ty * kMergeStep); };
     };
+    auto isRejected = [&](int i) { return std::find(rejected.begin(), rejected.end(), i) != rejected.end(); };
 
-    // Per tile and frame: robust weight from the mismatch with the reference, relative to the noise level.
-    std::vector<float> weight(static_cast<size_t>(n) * mtx * mty, 1.f);
-    st.noise.assign(n, 0.f);
-    const uint8_t* ry = frames_[ref].y.data();
-    parallelFor(n, [&](int i) {
-        if (i == ref) return;
-        float* wi = weight.data() + static_cast<size_t>(i) * mtx * mty;
-        if (std::find(rejected.begin(), rejected.end(), i) != rejected.end()) {
-            std::fill(wi, wi + static_cast<size_t>(mtx) * mty, 0.f);
-            return;
+    // The GPU gets the same per-tile shifts, chroma shifts rounded exactly as accumulateChroma does.
+    MergeJob job;
+    bool gpu = false;
+    if (accel) {
+        job.W = W, job.H = H, job.CW = CW, job.CH = CH, job.mtx = mtx, job.mty = mty, job.n = n, job.ref = ref;
+        job.shifts.resize(n);
+        for (int i = 0; i < n; ++i) {
+            job.y.push_back(frames_[i].y.data());
+            job.vu.push_back(frames_[i].vu.data());
+            std::vector<int32_t>& sh = job.shifts[i];
+            sh.resize(tiles * 4);
+            for (int ty = 0; ty < mty; ++ty) {
+                for (int tx = 0; tx < mtx; ++tx) {
+                    const Shift v = al.at(i, tx * S, ty * S);
+                    int32_t* o = sh.data() + (static_cast<size_t>(ty) * mtx + tx) * 4;
+                    o[0] = v.dx;
+                    o[1] = v.dy;
+                    o[2] = static_cast<int32_t>(std::lround(v.dx / 2.0));
+                    o[3] = static_cast<int32_t>(std::lround(v.dy / 2.0));
+                }
+            }
         }
+        gpu = accel->begin(job);
+    }
+
+    // Per tile and frame: mean |reference - frame| over the tile.
+    std::vector<std::vector<float>> mismatch(n);
+    const uint8_t* ry = frames_[ref].y.data();
+    auto cpuMismatch = [&](int i) {
         const uint8_t* ay = frames_[i].y.data();
-        std::vector<float> d(static_cast<size_t>(mtx) * mty);
+        std::vector<float>& d = mismatch[i];
+        d.assign(tiles, 0.f);
         for (int ty = 0; ty < mty; ++ty) {
             for (int tx = 0; tx < mtx; ++tx) {
                 const Shift sh = al.at(i, tx * S, ty * S);
@@ -591,6 +612,31 @@ void Stack::mergeRobust(const Alignment& al, const std::vector<int>& rejected, S
                 d[static_cast<size_t>(ty) * mtx + tx] = cnt ? static_cast<float>(sum / cnt) : 0.f;
             }
         }
+    };
+    if (gpu) {
+        for (int i = 0; i < n && gpu; ++i) {
+            if (i == ref || isRejected(i)) continue;
+            mismatch[i].assign(tiles, 0.f);
+            gpu = accel->tileMismatch(i, mismatch[i].data());
+        }
+    }
+    if (!gpu) {
+        parallelFor(n, [&](int i) {
+            if (i != ref && !isRejected(i)) cpuMismatch(i);
+        });
+    }
+
+    // Robust weight per tile and frame from the mismatch, relative to the noise level.
+    std::vector<float> weight(static_cast<size_t>(n) * tiles, 1.f);
+    st.noise.assign(n, 0.f);
+    for (int i = 0; i < n; ++i) {
+        if (i == ref) continue;
+        float* wi = weight.data() + static_cast<size_t>(i) * tiles;
+        if (isRejected(i)) {
+            std::fill(wi, wi + tiles, 0.f);
+            continue;
+        }
+        const std::vector<float>& d = mismatch[i];
         // Most tiles are static, so the median mismatch is the noise level between two frames.
         std::vector<float> sorted = d;
         std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
@@ -598,21 +644,34 @@ void Stack::mergeRobust(const Alignment& al, const std::vector<int>& rejected, S
         st.noise[i] = noise;
         const float lo = 1.5f * noise, hi = 3.0f * noise;
         for (size_t t = 0; t < d.size(); ++t) wi[t] = d[t] <= lo ? 1.f : (d[t] >= hi ? 0.f : (hi - d[t]) / (hi - lo));
-    });
-    st.tileWeight.assign(static_cast<size_t>(mtx) * mty, 1.f);
+    }
+    st.tileWeight.assign(tiles, 1.f);
     if (n > 1) {
-        for (size_t t = 0; t < st.tileWeight.size(); ++t) {
+        for (size_t t = 0; t < tiles; ++t) {
             float s = 0;
-            for (int i = 0; i < n; ++i) if (i != ref) s += weight[static_cast<size_t>(i) * mtx * mty + t];
+            for (int i = 0; i < n; ++i) if (i != ref) s += weight[static_cast<size_t>(i) * tiles + t];
             st.tileWeight[t] = s / (n - 1);
         }
     }
+
+    if (gpu) {
+        std::vector<float> y, v, u;
+        gpu = accel->accumulate(weight, y, v, u);
+        if (gpu) {
+            mergedY_.swap(y);
+            mergedV_.swap(v);
+            mergedU_.swap(u);
+        }
+    }
+    if (accel) accel->end();
+    st.engine = gpu ? "gpu" : "cpu";
+    if (gpu) return;
+
     auto weightOf = [&](int i) {
         return [&weight, i, mtx, mty](int tx, int ty) {
             return weight[static_cast<size_t>(i) * mtx * mty + static_cast<size_t>(ty) * mtx + tx];
         };
     };
-
     {
         std::vector<float> acc(static_cast<size_t>(W) * H, 0.f), wsum(acc.size(), 0.f);
         for (int i = 0; i < n; ++i) accumulateLuma(frames_[i].y.data(), W, H, mtx, mty, shiftOf(i), weightOf(i), acc, wsum);

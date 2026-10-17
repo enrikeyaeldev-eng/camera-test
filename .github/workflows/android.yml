@@ -43,8 +43,11 @@ jobs:
           "$SDKMANAGER" --install $ANDROID_PACKAGES > /dev/null
           echo "Installed: $ANDROID_PACKAGES"
 
-      - name: Native stacking tests (host compiler)
-        run: bash processing/host-test.sh
+      - name: Native stacking tests (host compiler, GPU merge on Mesa)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends libegl-dev libgles-dev libegl-mesa0 libgl1-mesa-dri
+          bash processing/host-test.sh
 
       - uses: gradle/actions/setup-gradle@v4
 

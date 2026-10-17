@@ -27,6 +27,30 @@ struct StackStats {
     std::vector<int> medianDy;
     double alignMs = 0;
     double mergeMs = 0;
+    std::string engine = "cpu";  // what ran the merge: "cpu" or "gpu"
+};
+
+// Input of the same-exposure merge, for a MergeAccelerator. Frames are luma (W×H) and NV21 chroma (CW×CH
+// V,U pairs); the merge works on mtx × mty overlapping tiles (32 px, step 16; chroma 16 px, step 8).
+struct MergeJob {
+    int W = 0, H = 0, CW = 0, CH = 0, mtx = 0, mty = 0, n = 0, ref = 0;
+    std::vector<const uint8_t*> y, vu;
+    // Per frame and tile: luma dx, dy and chroma dx, dy (4 ints per tile, row-major tiles).
+    std::vector<std::vector<int32_t>> shifts;
+};
+
+// Optional accelerator (the GPU) for the same-exposure merge. It must compute what the CPU merge computes;
+// any false return makes the merge fall back to the CPU.
+class MergeAccelerator {
+public:
+    virtual ~MergeAccelerator() = default;
+    virtual bool begin(const MergeJob& job) = 0;
+    // Mean |reference - frame| over each tile (mtx*mty values), with the frame shifted per tile.
+    virtual bool tileMismatch(int frame, float* out) = 0;
+    // Weighted, windowed sum of all frames (weight: n*mtx*mty), normalised: luma W*H, chroma CW*CH each.
+    virtual bool accumulate(const std::vector<float>& weight, std::vector<float>& y, std::vector<float>& v,
+                            std::vector<float>& u) = 0;
+    virtual void end() = 0;
 };
 
 struct ProcessParams {
@@ -34,6 +58,8 @@ struct ProcessParams {
     float minSharpness = 0.f;
     // HDR: frames have different exposures and are combined by exposure fusion instead of averaging.
     bool hdr = false;
+    // Runs the merge on the GPU when set; nullptr or any failure uses the CPU.
+    MergeAccelerator* accelerator = nullptr;
 };
 
 struct RenderParams {
@@ -75,6 +101,11 @@ public:
     // NV21 copy of a stored frame (debug output); empty once frames are freed.
     std::vector<uint8_t> frameNv21(int index) const;
 
+    // The merged planes (0..255), for tests that compare merge engines.
+    const std::vector<float>& mergedY() const { return mergedY_; }
+    const std::vector<float>& mergedV() const { return mergedV_; }
+    const std::vector<float>& mergedU() const { return mergedU_; }
+
 private:
     struct Frame {
         std::vector<uint8_t> y;   // width*height
@@ -98,7 +129,7 @@ private:
 
     std::vector<Level> pyramid(const Frame& f) const;
     struct Alignment;
-    void mergeRobust(const Alignment& al, const std::vector<int>& rejected, StackStats& st);
+    void mergeRobust(const Alignment& al, const std::vector<int>& rejected, StackStats& st, MergeAccelerator* accel);
     void fuseExposures(const Alignment& al, StackStats& st);
     std::vector<Shift> align(const std::vector<Level>& ref, const std::vector<Level>& alt, int* tilesX0, int* tilesY0) const;
     float sharpness(const Frame& f) const;
