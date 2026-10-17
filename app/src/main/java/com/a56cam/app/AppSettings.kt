@@ -39,6 +39,10 @@ class AppSettings(context: Context) {
         val grid: Boolean = false,
         val timerSeconds: Int = 0,
         val debug: Boolean = false,
+        /** Merge bursts on the GPU (when it passed its self-test). */
+        val gpuMerge: Boolean = true,
+        /** Merge the last preview frames from before the shutter press into bursts. */
+        val preShutter: Boolean = true,
     ) {
         fun captureOptions() = CaptureOptions(
             jpegQuality = jpegQuality,
@@ -68,6 +72,8 @@ class AppSettings(context: Context) {
             .putBoolean("grid", v.grid)
             .putInt("timerSeconds", v.timerSeconds)
             .putBoolean("debug", v.debug)
+            .putBoolean("gpuMerge", v.gpuMerge)
+            .putBoolean("preShutter", v.preShutter)
             .apply()
     }
 
@@ -88,6 +94,8 @@ class AppSettings(context: Context) {
             grid = prefs.getBoolean("grid", d.grid),
             timerSeconds = prefs.getInt("timerSeconds", d.timerSeconds),
             debug = prefs.getBoolean("debug", d.debug),
+            gpuMerge = prefs.getBoolean("gpuMerge", d.gpuMerge),
+            preShutter = prefs.getBoolean("preShutter", d.preShutter),
         )
     }
 

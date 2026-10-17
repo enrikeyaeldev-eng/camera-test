@@ -41,6 +41,11 @@ data class LensInfo(
     val minFocusDistance: Float,
     val manualFocusAvailable: Boolean,
     val awbModes: List<Int>,
+    /** Field of view relative to the main camera of the same side (0.6 for the ultra-wide). */
+    val lensFactor: Float = 1f,
+    /** Digital zoom range (CONTROL_ZOOM_RATIO); 1..1 when the camera has none. */
+    val zoomMin: Float = 1f,
+    val zoomMax: Float = 1f,
 ) {
     val burstLimits: BurstPlanner.Limits
         get() = BurstPlanner.Limits(exposureMinNs, exposureMaxNs, isoMin, isoMax)
@@ -62,11 +67,19 @@ object LensCatalog {
         fun mainOf(front: Boolean) = raw.filter { it.info.front == front }.maxByOrNull { it.sensorArea }
         val lenses = raw.map { r ->
             val main = mainOf(r.info.front)
-            r.info.copy(zoomLabel = CameraMath.zoomLabel(r.info.equivalentFocalMm, main?.info?.equivalentFocalMm ?: 0f))
+            val mainFocal = main?.info?.equivalentFocalMm ?: 0f
+            r.info.copy(
+                zoomLabel = CameraMath.zoomLabel(r.info.equivalentFocalMm, mainFocal),
+                lensFactor = if (mainFocal > 0f && r.info.equivalentFocalMm > 0f) r.info.equivalentFocalMm / mainFocal else 1f,
+            )
         }
         val mainBack = mainOf(false)?.info?.id
         val sorted = lenses.sortedWith(compareBy<LensInfo>({ it.front }, { it.id != mainBack }, { it.equivalentFocalMm }))
-        AppLog.i("Lenses: " + sorted.joinToString { "${it.id}:${if (it.front) "front" else "back"} ${it.zoomLabel} preview ${it.previewSize} jpeg ${it.jpegSize}" })
+        AppLog.i(
+            "Lenses: " + sorted.joinToString {
+                "${it.id}:${if (it.front) "front" else "back"} ${it.zoomLabel} preview ${it.previewSize} jpeg ${it.jpegSize} zoom ${it.zoomMin}-${it.zoomMax}"
+            },
+        )
         return sorted
     }
 
@@ -104,6 +117,7 @@ object LensCatalog {
         val expRange = c.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
         val isoRange = c.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
         val minFocus = c.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+        val zoomRange = c.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
         val info = LensInfo(
             id = id,
             front = front,
@@ -135,6 +149,8 @@ object LensCatalog {
             minFocusDistance = minFocus,
             manualFocusAvailable = minFocus > 0f && CameraMetadata.CONTROL_AF_MODE_OFF in afModes,
             awbModes = c.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)?.toList() ?: emptyList(),
+            zoomMin = zoomRange?.lower ?: 1f,
+            zoomMax = zoomRange?.upper ?: 1f,
         )
         if (yuv == null) AppLog.w("Camera $id: no YUV output, burst modes unavailable")
         if (!info.aeOffAvailable) AppLog.w("Camera $id: AE OFF not offered, bursts use AE lock instead of manual exposure")

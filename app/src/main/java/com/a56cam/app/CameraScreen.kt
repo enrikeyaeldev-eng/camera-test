@@ -13,6 +13,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -121,6 +122,12 @@ fun CameraScreen(vm: CameraViewModel, deviceOrientation: () -> Int, onOpenSettin
                                 onTap = { o -> vm.controller.focusAt(CameraMath.Point(o.x / size.width, o.y / size.height)) },
                                 onLongPress = { vm.controller.resetFocus() },
                             )
+                        }
+                        .pointerInput(lens.id) {
+                            // Pinch to zoom; the state is read here, not captured, so each step builds on the last.
+                            detectTransformGestures { _, _, zoomChange, _ ->
+                                vm.controller.setZoom(vm.controller.state.value.zoom * zoomChange)
+                            }
                         },
                 )
                 if (settings.grid) Grid()
@@ -156,24 +163,34 @@ fun CameraScreen(vm: CameraViewModel, deviceOrientation: () -> Int, onOpenSettin
                         .padding(horizontal = 8.dp, vertical = 3.dp),
                 )
             }
-            // Lens choice for the current side, on the preview (e.g. 0.6x and 1x on the back).
+            // Zoom: the lenses of the current side (e.g. 0.6x and 1x on the back) plus 2x digital zoom on the
+            // main lens. The selected chip shows the exact zoom while pinching.
             val sameSide = st.lenses.filter { it.front == lens?.front }
-            if (sameSide.size > 1) {
+            val main = sameSide.firstOrNull { kotlin.math.abs(it.lensFactor - 1f) < 0.05f }
+            val chips = sameSide.map { ZoomChip(it.zoomLabel, it, 1f) } +
+                listOfNotNull(main?.takeIf { it.zoomMax >= 2f }?.let { ZoomChip("2x", it, 2f) })
+            if (lens != null && chips.size > 1) {
                 Row(
                     modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp)
                         .clip(RoundedCornerShape(20.dp)).background(Color(0x66000000)).padding(4.dp),
                 ) {
-                    sameSide.forEach { l ->
-                        val selected = l.id == lens?.id
+                    val active = chips.lastOrNull { it.lens.id == lens.id && st.zoom >= it.zoom - 0.01f }
+                    chips.forEach { c ->
+                        val selected = c == active
+                        val exact = lens.lensFactor * st.zoom
+                        val label = if (selected && kotlin.math.abs(st.zoom - c.zoom) > 0.05f) formatZoom(exact) else c.label
                         Text(
-                            l.zoomLabel,
+                            label,
                             color = if (selected) Accent else Color.White,
                             fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
                             fontSize = 13.sp,
                             modifier = Modifier
                                 .clip(CircleShape)
                                 .background(if (selected) Color(0x99000000) else Color.Transparent)
-                                .clickable(enabled = !photo.busy) { vm.selectLens(l.id) }
+                                .clickable(enabled = !photo.busy) {
+                                    vm.selectLens(c.lens.id)
+                                    vm.controller.setZoom(c.zoom)
+                                }
                                 .padding(horizontal = 12.dp, vertical = 6.dp),
                         )
                     }
@@ -257,6 +274,13 @@ fun CameraScreen(vm: CameraViewModel, deviceOrientation: () -> Int, onOpenSettin
                 photo.thumbnail?.let {
                     Image(it.asImageBitmap(), "Last photo", contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                 }
+                // Bursts still merging in the background; the thumbnail updates when each one is saved.
+                if (photo.processing > 0) {
+                    Box(Modifier.fillMaxSize().background(Color(0x88000000)), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp, modifier = Modifier.size(28.dp))
+                        if (photo.processing > 1) Text("${photo.processing}", color = Color.White, fontSize = 12.sp)
+                    }
+                }
             }
 
             val canShoot = st.open && !st.capturing && !photo.busy
@@ -285,6 +309,12 @@ fun CameraScreen(vm: CameraViewModel, deviceOrientation: () -> Int, onOpenSettin
         }
     }
 }
+
+private data class ZoomChip(val label: String, val lens: LensInfo, val zoom: Float)
+
+/** "1.7x", or "2x" for whole numbers. */
+private fun formatZoom(z: Float): String =
+    if (kotlin.math.abs(z - Math.round(z)) < 0.05f) "${Math.round(z)}x" else String.format(Locale.US, "%.1fx", z)
 
 /** Manual focus distance and white balance presets, shown under the preview when "Manual" is on. */
 @Composable

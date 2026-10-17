@@ -32,6 +32,8 @@ fun SettingsScreen(
     settings: AppSettings,
     lens: LensInfo?,
     version: String,
+    /** Outcome of the GPU self-test, or null while it runs. */
+    gpuStatus: String?,
     onBack: () -> Unit,
     onDeviceReport: () -> Unit,
     onShareLogs: () -> Unit,
@@ -100,6 +102,16 @@ fun SettingsScreen(
             AppSettings.RawOutput.entries.forEach { r ->
                 Choice(r.label, values.rawOutput == r) { settings.update { it.copy(rawOutput = r) } }
             }
+            Toggle("Use frames from just before the shutter press", values.preShutter) { on ->
+                settings.update { it.copy(preShutter = on) }
+            }
+            Text(
+                "The last 3 preview frames are merged in, so the photo shows the moment you pressed and the burst " +
+                    "after the press is shorter. Keeps full-size frames flowing while a burst mode is open (more battery).",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Toggle("Merge on the GPU", values.gpuMerge) { on -> settings.update { it.copy(gpuMerge = on) } }
+            Text(gpuStatus ?: "Checking the GPU…", style = MaterialTheme.typography.bodySmall)
         }
 
         Section("Shutter and display") {

@@ -12,6 +12,7 @@ import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.OutputConfiguration
+import android.media.Image
 import android.media.ImageReader
 import android.util.Size
 import android.view.Surface
@@ -32,9 +33,12 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
-/** Receives each burst frame on the image thread; the image is closed right after this returns. */
+/**
+ * Receives each burst frame on the image thread; the image is closed right after this returns.
+ * [exposure] is exposure time × ISO of that frame (frames from before the shutter press differ).
+ */
 fun interface FrameSink {
-    fun onFrame(image: android.media.Image, index: Int)
+    fun onFrame(image: Image, index: Int, exposure: Double)
 }
 
 /** Per-shot options chosen in Settings; null means "leave the camera's default". */
@@ -72,6 +76,10 @@ class CameraController(context: Context) {
         /** Manual focus distance in diopters (1/m), or null for auto focus. */
         val manualFocus: Float? = null,
         val awbMode: Int = CameraMetadata.CONTROL_AWB_MODE_AUTO,
+        /** Digital zoom ratio on the current lens (CONTROL_ZOOM_RATIO). */
+        val zoom: Float = 1f,
+        /** Burst modes keep the last full-size preview frames and merge them in (frames from before the press). */
+        val preShutter: Boolean = true,
     )
 
     private val manager = context.getSystemService(CameraManager::class.java)
@@ -98,6 +106,24 @@ class CameraController(context: Context) {
     private var openBurst = false
     private var openLens: LensInfo? = null
     private var openSurface: Surface? = null
+
+    // Frames from before the shutter press: the newest full-size YUV preview frames, held without copying,
+    // and the exposure (time × ISO × boost) of recent preview frames by sensor timestamp.
+    private val ring = ArrayDeque<Image>()
+    private val ringExposure = object : LinkedHashMap<Long, Double>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Double>?) = size > 32
+    }
+    private val ringListener = ImageReader.OnImageAvailableListener { r ->
+        val image = try {
+            r.acquireNextImage()
+        } catch (e: IllegalStateException) {
+            null
+        } ?: return@OnImageAvailableListener
+        synchronized(ring) {
+            ring.addLast(image)
+            while (ring.size > RING_FRAMES) ring.removeFirst().close()
+        }
+    }
 
     @Volatile private var afWaiter: CompletableDeferred<Int>? = null
     @Volatile private var pendingJpeg: CompletableDeferred<ByteArray>? = null
@@ -167,7 +193,7 @@ class CameraController(context: Context) {
         _state.update {
             it.copy(
                 lens = lens, evIndex = 0, aeLock = false, awbLock = false, focusPoint = null, focusState = FocusState.IDLE,
-                manualFocus = null, awbMode = CameraMetadata.CONTROL_AWB_MODE_AUTO,
+                manualFocus = null, awbMode = CameraMetadata.CONTROL_AWB_MODE_AUTO, zoom = 1f,
             )
         }
         requestReconcile()
@@ -178,6 +204,22 @@ class CameraController(context: Context) {
         if (_state.value.burstSession == enabled) return
         _state.update { it.copy(burstSession = enabled) }
         requestReconcile()
+    }
+
+    /** Digital zoom on the current lens, clamped to what it supports. */
+    fun setZoom(ratio: Float) {
+        val lens = _state.value.lens ?: return
+        val z = ratio.coerceIn(lens.zoomMin, lens.zoomMax)
+        if (z == _state.value.zoom) return
+        _state.update { it.copy(zoom = z) }
+        refreshPreview()
+    }
+
+    /** Keeps (or stops keeping) full-size preview frames to merge into bursts. */
+    fun setPreShutter(enabled: Boolean) {
+        if (_state.value.preShutter == enabled) return
+        _state.update { it.copy(preShutter = enabled) }
+        refreshPreview()
     }
 
     /** Manual focus in diopters (0 = infinity), or null to return to auto focus. */
@@ -322,10 +364,11 @@ class CameraController(context: Context) {
 
     /**
      * Captures one full-size YUV frame per entry of [frames] with manual exposure, white balance locked and
-     * the camera's own noise reduction and sharpening off. Frames go to [sink] as they arrive.
-     * Returns how many frames were delivered.
+     * the camera's own noise reduction and sharpening off. Up to [preFrames] frames from just before the call
+     * (the preview stream at auto exposure) come first and replace as many burst frames. Frames go to [sink]
+     * as they arrive. Returns how many frames were delivered.
      */
-    suspend fun takeBurst(frames: List<BurstPlanner.Frame>, sink: FrameSink): Int = withContext(dispatcher) {
+    suspend fun takeBurst(frames: List<BurstPlanner.Frame>, preFrames: Int, sink: FrameSink): Int = withContext(dispatcher) {
         mutex.withLock {
             val s = session ?: throw CameraException("Camera is not open")
             val dev = device ?: throw CameraException("Camera is not open")
@@ -335,8 +378,43 @@ class CameraController(context: Context) {
             _state.update { it.copy(capturing = true) }
             val st = _state.value
             val lockAf = st.focusPoint == null && st.manualFocus == null && lens.continuousAf
+
+            // Burst frames are recognised by their sensor timestamps: preview frames still in flight also
+            // reach the reader and must not be counted. Unmatched images wait briefly in case their
+            // timestamp is reported just after them.
+            val stamps = java.util.concurrent.ConcurrentHashMap.newKeySet<Long>()
+            val strays = ArrayList<Image>()  // image thread only
             val received = java.util.concurrent.atomic.AtomicInteger(0)
             val done = CompletableDeferred<Unit>()
+            var post = frames
+            var preCount = 0
+            // Set when takeBurst returns: the caller merges the frames next, so late ones are dropped.
+            val closed = java.util.concurrent.atomic.AtomicBoolean(false)
+            fun deliver(image: Image) {
+                if (closed.get()) {
+                    image.close()
+                    return
+                }
+                try {
+                    val k = received.getAndIncrement()
+                    if (k < post.size) sink.onFrame(image, preCount + k, post[k].product)
+                } catch (e: Exception) {
+                    AppLog.e("Burst frame copy failed", e)
+                } finally {
+                    image.close()
+                }
+                if (received.get() >= post.size) done.complete(Unit)
+            }
+            fun matchStrays() {
+                val iter = strays.iterator()
+                while (iter.hasNext()) {
+                    val image = iter.next()
+                    if (image.timestamp in stamps) {
+                        iter.remove()
+                        deliver(image)
+                    }
+                }
+            }
             reader.setOnImageAvailableListener({ r ->
                 val image = try {
                     r.acquireNextImage()
@@ -344,25 +422,51 @@ class CameraController(context: Context) {
                     AppLog.w("Burst acquire failed", e)
                     null
                 } ?: return@setOnImageAvailableListener
-                try {
-                    val index = received.getAndIncrement()
-                    if (index < frames.size) sink.onFrame(image, index)
-                } catch (e: Exception) {
-                    AppLog.e("Burst frame copy failed", e)
-                } finally {
-                    image.close()
+                if (image.timestamp in stamps) {
+                    deliver(image)
+                } else {
+                    strays.add(image)
+                    while (strays.size > 3) strays.removeAt(0).close()
                 }
-                if (received.get() >= frames.size) done.complete(Unit)
             }, imageThread.handler)
+
+            // Frames from before the press, taken before the AF lock below so they show the moment of the press.
+            val pre = if (preFrames > 0 && st.preShutter) takeRingFrames(preFrames) else emptyList()
+            preCount = pre.size
+            post = frames.take(maxOf(1, frames.size - pre.size))
+            // Delivered on the image thread ahead of any burst frame, so the sink sees one thread only.
+            imageThread.handler.post {
+                pre.forEachIndexed { i, (image, exposure) ->
+                    try {
+                        sink.onFrame(image, i, exposure)
+                    } catch (e: Exception) {
+                        AppLog.e("Pre-shutter frame copy failed", e)
+                    } finally {
+                        image.close()
+                    }
+                }
+            }
+            val callback = object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureStarted(s: CameraCaptureSession, request: CaptureRequest, timestamp: Long, frameNumber: Long) {
+                    stamps.add(timestamp)
+                    imageThread.handler.post { matchStrays() }
+                }
+
+                override fun onCaptureFailed(s: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
+                    AppLog.e("Camera ${openLens?.id}: burst frame failed reason=${failure.reason} ${CameraOps.describeRequest(request)}")
+                }
+            }
             try {
+                // The preview keeps running during the burst, without feeding the ring.
+                if (st.preShutter) s.setRepeatingRequest(previewRequest(null, feedRing = false), previewCallback, cameraThread.handler)
                 if (lockAf) {
                     val waiter = CompletableDeferred<Int>()
                     afWaiter = waiter
-                    s.capture(previewRequest(CameraMetadata.CONTROL_AF_TRIGGER_START), previewCallback, cameraThread.handler)
+                    s.capture(previewRequest(CameraMetadata.CONTROL_AF_TRIGGER_START, feedRing = false), previewCallback, cameraThread.handler)
                     if (withTimeoutOrNull(1_000) { waiter.await() } == null) AppLog.w("Camera ${lens.id}: AF did not lock before burst")
                     afWaiter = null
                 }
-                val requests = frames.mapIndexed { i, f ->
+                val requests = post.mapIndexed { i, f ->
                     dev.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                         addTarget(preview)
                         addTarget(reader.surface)
@@ -383,29 +487,57 @@ class CameraController(context: Context) {
                         setTag("burst-$i")
                     }.build()
                 }
-                s.captureBurst(requests, burstCallback, cameraThread.handler)
-                val timeoutMs = frames.sumOf { maxOf(it.exposureNs, lens.yuvMinFrameNs) } / 1_000_000 + 4_000
+                s.captureBurst(requests, callback, cameraThread.handler)
+                val timeoutMs = post.sumOf { maxOf(it.exposureNs, lens.yuvMinFrameNs) } / 1_000_000 + 4_000
                 if (withTimeoutOrNull(timeoutMs) { done.await() } == null) {
-                    AppLog.w("Camera ${lens.id}: burst delivered ${received.get()} of ${frames.size} frames in $timeoutMs ms")
+                    AppLog.w("Camera ${lens.id}: burst delivered ${received.get()} of ${post.size} frames in $timeoutMs ms")
                 }
-                AppLog.i("Camera ${lens.id}: burst of ${frames.size} frames done, first ${frames.firstOrNull()}")
-                minOf(received.get(), frames.size)
+                AppLog.i("Camera ${lens.id}: burst of ${post.size} frames done (+${pre.size} from before the press), first ${post.firstOrNull()}")
+                pre.size + minOf(received.get(), post.size)
             } finally {
-                reader.setOnImageAvailableListener({ r -> r.acquireLatestImage()?.close() }, imageThread.handler)
-                if (lockAf && session === s) {
-                    safely("release AF lock") {
-                        s.capture(previewRequest(CameraMetadata.CONTROL_AF_TRIGGER_CANCEL), previewCallback, cameraThread.handler)
+                closed.set(true)
+                reader.setOnImageAvailableListener(ringListener, imageThread.handler)
+                // Wait until the image thread has finished any delivery in progress.
+                val drained = CompletableDeferred<Unit>()
+                imageThread.handler.post {
+                    strays.forEach { it.close() }
+                    strays.clear()
+                    drained.complete(Unit)
+                }
+                withTimeoutOrNull(2_000) { drained.await() }
+                if (session === s) {
+                    if (lockAf) {
+                        safely("release AF lock") {
+                            s.capture(previewRequest(CameraMetadata.CONTROL_AF_TRIGGER_CANCEL), previewCallback, cameraThread.handler)
+                        }
                     }
+                    if (st.preShutter) safely("restart preview") { startPreviewLocked() }
                 }
                 _state.update { it.copy(capturing = false) }
             }
         }
     }
 
-    private val burstCallback = object : CameraCaptureSession.CaptureCallback() {
-        override fun onCaptureFailed(s: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
-            AppLog.e("Camera ${openLens?.id}: burst frame failed reason=${failure.reason} ${CameraOps.describeRequest(request)}")
+    /**
+     * Takes up to [count] of the newest ring frames whose exposure is known and that are at most 0.4 s older
+     * than the newest one; returns them oldest first with their exposure. The ring is emptied.
+     */
+    private fun takeRingFrames(count: Int): List<Pair<Image, Double>> {
+        val picked = ArrayList<Pair<Image, Double>>()
+        synchronized(ring) {
+            val newest = ring.lastOrNull()?.timestamp ?: return emptyList()
+            for (image in ring.reversed()) {
+                val exposure = synchronized(ringExposure) { ringExposure[image.timestamp] }
+                if (picked.size < count && exposure != null && newest - image.timestamp <= 400_000_000L) {
+                    picked.add(image to exposure)
+                } else {
+                    image.close()
+                }
+            }
+            ring.clear()
         }
+        picked.reverse()
+        return picked
     }
 
     // ------------------------------------------------------------------ open / close
@@ -430,8 +562,9 @@ class CameraController(context: Context) {
             device = dev
             val reader = if (burst) {
                 val yuv = target.yuvSize!!
-                ImageReader.newInstance(yuv.width, yuv.height, ImageFormat.YUV_420_888, 3).also {
-                    it.setOnImageAvailableListener({ r -> r.acquireLatestImage()?.close() }, imageThread.handler)
+                // Room for the ring, frames handed to the merge and a few in flight.
+                ImageReader.newInstance(yuv.width, yuv.height, ImageFormat.YUV_420_888, RING_FRAMES + 5).also {
+                    it.setOnImageAvailableListener(ringListener, imageThread.handler)
                     yuvReader = it
                 }
             } else {
@@ -471,6 +604,10 @@ class CameraController(context: Context) {
             AppLog.w("Camera ${openLens?.id}: session close failed", e)
         }
         device?.close()
+        synchronized(ring) {
+            ring.forEach { it.close() }
+            ring.clear()
+        }
         jpegReader?.setOnImageAvailableListener(null, null)
         jpegReader?.close()
         yuvReader?.setOnImageAvailableListener(null, null)
@@ -494,11 +631,14 @@ class CameraController(context: Context) {
         s.setRepeatingRequest(previewRequest(null), previewCallback, cameraThread.handler)
     }
 
-    private fun previewRequest(afTrigger: Int?): CaptureRequest {
+    /** [feedRing]: in burst modes with pre-shutter frames on, also feed the full-size YUV stream into the ring. */
+    private fun previewRequest(afTrigger: Int?, feedRing: Boolean = true): CaptureRequest {
         val dev = device ?: throw CameraException("Camera is not open")
         val lens = openLens ?: throw CameraException("Camera is not open")
         return dev.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
             addTarget(openSurface ?: throw CameraException("No preview surface"))
+            val yuv = yuvReader
+            if (feedRing && openBurst && _state.value.preShutter && yuv != null) addTarget(yuv.surface)
             applyCommon(this, lens)
             afTrigger?.let { set(CaptureRequest.CONTROL_AF_TRIGGER, it) }
             setTag(if (afTrigger == null) "preview" else "af-trigger-$afTrigger")
@@ -539,6 +679,7 @@ class CameraController(context: Context) {
         if (lens.evStep > 0f) b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, st.evIndex.coerceIn(lens.evMin, lens.evMax))
         if (lens.aeLockAvailable) b.set(CaptureRequest.CONTROL_AE_LOCK, st.aeLock)
         if (lens.awbLockAvailable) b.set(CaptureRequest.CONTROL_AWB_LOCK, st.awbLock)
+        if (lens.zoomMax > lens.zoomMin) b.set(CaptureRequest.CONTROL_ZOOM_RATIO, st.zoom.coerceIn(lens.zoomMin, lens.zoomMax))
     }
 
     private val previewCallback = object : CameraCaptureSession.CaptureCallback() {
@@ -546,7 +687,12 @@ class CameraController(context: Context) {
             if (result.get(CaptureResult.CONTROL_AE_MODE) != CameraMetadata.CONTROL_AE_MODE_OFF) {
                 val exposure = result.get(CaptureResult.SENSOR_EXPOSURE_TIME)
                 val iso = result.get(CaptureResult.SENSOR_SENSITIVITY)
-                if (exposure != null && iso != null) lastAuto = exposure to iso
+                if (exposure != null && iso != null) {
+                    lastAuto = exposure to iso
+                    val stamp = result.get(CaptureResult.SENSOR_TIMESTAMP)
+                    val boost = result.get(CaptureResult.CONTROL_POST_RAW_SENSITIVITY_BOOST) ?: 100
+                    if (stamp != null) synchronized(ringExposure) { ringExposure[stamp] = exposure.toDouble() * iso * boost / 100.0 }
+                }
             }
             val af = result.get(CaptureResult.CONTROL_AF_STATE) ?: return
             if (af == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED || af == CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED) {
@@ -615,6 +761,11 @@ class CameraController(context: Context) {
         } finally {
             image.close()
         }
+    }
+
+    private companion object {
+        /** Full-size preview frames kept for merging into bursts. */
+        const val RING_FRAMES = 3
     }
 
     private inline fun safely(what: String, block: () -> Unit) {

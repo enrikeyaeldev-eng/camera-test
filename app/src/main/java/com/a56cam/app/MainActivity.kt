@@ -121,6 +121,7 @@ class MainActivity : ComponentActivity() {
         val granted by permissionGranted
         val reportState by reportVm.state.collectAsState()
         val cameraState by cameraVm.controller.state.collectAsState()
+        val photoUi by cameraVm.photo.collectAsState()
 
         BackHandler(enabled = screen != Screen.CAMERA && !reportState.running) {
             screen = if (screen == Screen.REPORT) Screen.SETTINGS else Screen.CAMERA
@@ -148,6 +149,7 @@ class MainActivity : ComponentActivity() {
                 settings = cameraVm.settings,
                 lens = cameraState.lens,
                 version = reportVm.version,
+                gpuStatus = photoUi.gpuStatus,
                 onBack = { screen = Screen.CAMERA },
                 onDeviceReport = { screen = Screen.REPORT },
                 onShareLogs = { shareLogs() },
