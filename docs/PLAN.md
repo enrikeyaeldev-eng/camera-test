@@ -176,7 +176,7 @@ Status (Oct 17, 2026): **Done when met.** Build 5 installed from `latest`, the r
 | NR and edge modes | OFF, FAST and HIGH_QUALITY listed for both. | Whether they are honoured is **not yet measured**: see the bug below. |
 | High-speed video | Back main: 1280 × 720 up to 240 fps. Ultrawide: none. | Relevant to the video idea below. |
 
-**Diagnostics bug still to fix:** at 30 fps the app stopped pairing frames with their results. That left gaps in the 1/1000 to 1/60 s exposure points, ISO 400 and above, all of EV bracketing, all NR/edge crops and the full-size reference frame. Every capture at 15 fps or slower worked. The likely cause is that frame handling falls behind the 12-entry pairing buffer in `LiveSession`. Fix it, ideally after reading the owner's app log, and re-run the report before Phase 3's tuning depends on NR/edge and EV numbers.
+**Diagnostics bug (fixed, needs a re-run):** at 30 fps the app stopped pairing frames with their results. That left gaps in the 1/1000 to 1/60 s exposure points, ISO 400 and above, all of EV bracketing, all NR/edge crops and the full-size reference frame. The owner's app log confirmed the cause. Reading YUV pixels one byte at a time took longer than a frame (33 ms), so images queued up and their results fell out of the 12-entry pairing buffer. The fix reads whole rows in bulk, keeps up to 90 unpaired results, and records per-frame analysis time in the report. The report now also runs the live tests on every camera (IDs 0 to 3), not only the main back camera. **Lesson for Phase 3:** never touch frame pixels per byte from Kotlin; copy rows in bulk or in C++.
 
 ### Phase 1: Basic camera
 
