@@ -29,7 +29,22 @@ data class LensInfo(
     val awbLockAvailable: Boolean,
     val noiseReductionModes: List<Int>,
     val edgeModes: List<Int>,
-)
+    /** Largest YUV_420_888 size (burst stacking input), or null if the camera has none. */
+    val yuvSize: Size?,
+    val yuvMinFrameNs: Long,
+    val aeOffAvailable: Boolean,
+    val exposureMinNs: Long,
+    val exposureMaxNs: Long,
+    val isoMin: Int,
+    val isoMax: Int,
+    /** Closest focus in diopters (1/m); 0 means fixed focus. */
+    val minFocusDistance: Float,
+    val manualFocusAvailable: Boolean,
+    val awbModes: List<Int>,
+) {
+    val burstLimits: BurstPlanner.Limits
+        get() = BurstPlanner.Limits(exposureMinNs, exposureMaxNs, isoMin, isoMax)
+}
 
 /** All usable cameras, main back camera first. Cameras without JPEG or preview outputs are skipped and logged. */
 object LensCatalog {
@@ -82,6 +97,13 @@ object LensCatalog {
         val afModes = c.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)?.toList() ?: emptyList()
         val evRange = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
         val evStep = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)
+        val yuv = map.getOutputSizes(ImageFormat.YUV_420_888)?.maxByOrNull { it.width.toLong() * it.height }
+        val yuvMinFrame = yuv?.let { map.getOutputMinFrameDuration(ImageFormat.YUV_420_888, it) } ?: 33_333_333L
+        val aeModes = c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES)?.toList() ?: emptyList()
+        // LIMITED devices may omit these ranges even though AE OFF works (Phase 0); fall back to measured values.
+        val expRange = c.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+        val isoRange = c.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+        val minFocus = c.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
         val info = LensInfo(
             id = id,
             front = front,
@@ -103,7 +125,19 @@ object LensCatalog {
             awbLockAvailable = c.get(CameraCharacteristics.CONTROL_AWB_LOCK_AVAILABLE) == true,
             noiseReductionModes = c.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES)?.toList() ?: emptyList(),
             edgeModes = c.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES)?.toList() ?: emptyList(),
+            yuvSize = yuv,
+            yuvMinFrameNs = yuvMinFrame,
+            aeOffAvailable = CameraMetadata.CONTROL_AE_MODE_OFF in aeModes,
+            exposureMinNs = expRange?.lower ?: 100_000L,
+            exposureMaxNs = expRange?.upper ?: 100_000_000L,
+            isoMin = isoRange?.lower ?: 50,
+            isoMax = isoRange?.upper ?: 1600,
+            minFocusDistance = minFocus,
+            manualFocusAvailable = minFocus > 0f && CameraMetadata.CONTROL_AF_MODE_OFF in afModes,
+            awbModes = c.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES)?.toList() ?: emptyList(),
         )
+        if (yuv == null) AppLog.w("Camera $id: no YUV output, burst modes unavailable")
+        if (!info.aeOffAvailable) AppLog.w("Camera $id: AE OFF not offered, bursts use AE lock instead of manual exposure")
         if (!info.continuousAf) AppLog.i("Camera $id: no continuous AF (fixed focus?)")
         if (info.evStep <= 0f) AppLog.w("Camera $id: no exposure compensation")
         return Raw(info, (sensor?.width ?: 0f) * (sensor?.height ?: 0f))

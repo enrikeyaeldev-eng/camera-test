@@ -32,6 +32,11 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
+/** Receives each burst frame on the image thread; the image is closed right after this returns. */
+fun interface FrameSink {
+    fun onFrame(image: android.media.Image, index: Int)
+}
+
 /** Per-shot options chosen in Settings; null means "leave the camera's default". */
 data class CaptureOptions(
     val jpegQuality: Int = 95,
@@ -62,6 +67,11 @@ class CameraController(context: Context) {
         val focusState: FocusState = FocusState.IDLE,
         val capturing: Boolean = false,
         val error: String? = null,
+        /** Session with a full-size YUV stream for burst modes, instead of the JPEG stream. */
+        val burstSession: Boolean = false,
+        /** Manual focus distance in diopters (1/m), or null for auto focus. */
+        val manualFocus: Float? = null,
+        val awbMode: Int = CameraMetadata.CONTROL_AWB_MODE_AUTO,
     )
 
     private val manager = context.getSystemService(CameraManager::class.java)
@@ -78,11 +88,14 @@ class CameraController(context: Context) {
     @Volatile private var resumed = false
     @Volatile private var surface: Surface? = null
     @Volatile private var surfaceSize: Size? = null
+    @Volatile private var lastAuto: Pair<Long, Int>? = null
 
     // What is open; touched only on the camera thread while holding the mutex.
     private var device: CameraDevice? = null
     private var session: CameraCaptureSession? = null
     private var jpegReader: ImageReader? = null
+    private var yuvReader: ImageReader? = null
+    private var openBurst = false
     private var openLens: LensInfo? = null
     private var openSurface: Surface? = null
 
@@ -152,10 +165,38 @@ class CameraController(context: Context) {
         if (lens.id == _state.value.lens?.id) return
         AppLog.i("Switching to camera ${lens.id} (${lens.zoomLabel}, ${if (lens.front) "front" else "back"})")
         _state.update {
-            it.copy(lens = lens, evIndex = 0, aeLock = false, awbLock = false, focusPoint = null, focusState = FocusState.IDLE)
+            it.copy(
+                lens = lens, evIndex = 0, aeLock = false, awbLock = false, focusPoint = null, focusState = FocusState.IDLE,
+                manualFocus = null, awbMode = CameraMetadata.CONTROL_AWB_MODE_AUTO,
+            )
         }
         requestReconcile()
     }
+
+    /** Switches between the JPEG session (Photo) and the YUV session (burst modes); reopens the camera. */
+    fun setBurstSession(enabled: Boolean) {
+        if (_state.value.burstSession == enabled) return
+        _state.update { it.copy(burstSession = enabled) }
+        requestReconcile()
+    }
+
+    /** Manual focus in diopters (0 = infinity), or null to return to auto focus. */
+    fun setManualFocus(diopters: Float?) {
+        val lens = _state.value.lens ?: return
+        if (diopters != null && !lens.manualFocusAvailable) return
+        _state.update { it.copy(manualFocus = diopters?.coerceIn(0f, lens.minFocusDistance), focusPoint = null, focusState = FocusState.IDLE) }
+        refreshPreview()
+    }
+
+    fun setAwbMode(mode: Int) {
+        val lens = _state.value.lens ?: return
+        if (mode !in lens.awbModes) return
+        _state.update { it.copy(awbMode = mode) }
+        refreshPreview()
+    }
+
+    /** The latest auto exposure (time in ns, ISO) from the preview, the starting point for burst plans. */
+    fun autoExposure(): Pair<Long, Int>? = lastAuto
 
     fun setEv(index: Int) {
         val lens = _state.value.lens ?: return
@@ -178,7 +219,8 @@ class CameraController(context: Context) {
     /** Focuses and meters at a tap on the preview (0..1 in both axes). */
     fun focusAt(point: CameraMath.Point) {
         val lens = _state.value.lens ?: return
-        val canFocus = lens.autoAf && lens.maxAfRegions > 0
+        // With manual focus a tap only meters.
+        val canFocus = lens.autoAf && lens.maxAfRegions > 0 && _state.value.manualFocus == null
         if (!canFocus && lens.maxAeRegions == 0) {
             AppLog.i("Camera ${lens.id}: no AF or AE regions, tap ignored")
             return
@@ -224,9 +266,9 @@ class CameraController(context: Context) {
             val s = session ?: throw CameraException("Camera is not open")
             val dev = device ?: throw CameraException("Camera is not open")
             val lens = openLens ?: throw CameraException("Camera is not open")
-            val reader = jpegReader ?: throw CameraException("Camera is not open")
+            val reader = jpegReader ?: throw CameraException("Photo capture needs Photo mode")
             _state.update { it.copy(capturing = true) }
-            val lockAf = _state.value.focusPoint == null && lens.continuousAf
+            val lockAf = _state.value.focusPoint == null && _state.value.manualFocus == null && lens.continuousAf
             try {
                 if (lockAf) {
                     val waiter = CompletableDeferred<Int>()
@@ -278,6 +320,94 @@ class CameraController(context: Context) {
         }
     }
 
+    /**
+     * Captures one full-size YUV frame per entry of [frames] with manual exposure, white balance locked and
+     * the camera's own noise reduction and sharpening off. Frames go to [sink] as they arrive.
+     * Returns how many frames were delivered.
+     */
+    suspend fun takeBurst(frames: List<BurstPlanner.Frame>, sink: FrameSink): Int = withContext(dispatcher) {
+        mutex.withLock {
+            val s = session ?: throw CameraException("Camera is not open")
+            val dev = device ?: throw CameraException("Camera is not open")
+            val lens = openLens ?: throw CameraException("Camera is not open")
+            val reader = yuvReader ?: throw CameraException("Burst capture needs a burst mode")
+            val preview = openSurface ?: throw CameraException("No preview surface")
+            _state.update { it.copy(capturing = true) }
+            val st = _state.value
+            val lockAf = st.focusPoint == null && st.manualFocus == null && lens.continuousAf
+            val received = java.util.concurrent.atomic.AtomicInteger(0)
+            val done = CompletableDeferred<Unit>()
+            reader.setOnImageAvailableListener({ r ->
+                val image = try {
+                    r.acquireNextImage()
+                } catch (e: IllegalStateException) {
+                    AppLog.w("Burst acquire failed", e)
+                    null
+                } ?: return@setOnImageAvailableListener
+                try {
+                    val index = received.getAndIncrement()
+                    if (index < frames.size) sink.onFrame(image, index)
+                } catch (e: Exception) {
+                    AppLog.e("Burst frame copy failed", e)
+                } finally {
+                    image.close()
+                }
+                if (received.get() >= frames.size) done.complete(Unit)
+            }, imageThread.handler)
+            try {
+                if (lockAf) {
+                    val waiter = CompletableDeferred<Int>()
+                    afWaiter = waiter
+                    s.capture(previewRequest(CameraMetadata.CONTROL_AF_TRIGGER_START), previewCallback, cameraThread.handler)
+                    if (withTimeoutOrNull(1_000) { waiter.await() } == null) AppLog.w("Camera ${lens.id}: AF did not lock before burst")
+                    afWaiter = null
+                }
+                val requests = frames.mapIndexed { i, f ->
+                    dev.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                        addTarget(preview)
+                        addTarget(reader.surface)
+                        applyCommon(this, lens)
+                        if (lens.aeOffAvailable) {
+                            set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
+                            set(CaptureRequest.SENSOR_EXPOSURE_TIME, f.exposureNs)
+                            set(CaptureRequest.SENSOR_SENSITIVITY, f.iso)
+                            set(CaptureRequest.SENSOR_FRAME_DURATION, maxOf(f.exposureNs, lens.yuvMinFrameNs))
+                        } else if (lens.aeLockAvailable) {
+                            set(CaptureRequest.CONTROL_AE_LOCK, true)
+                        }
+                        if (lens.awbLockAvailable) set(CaptureRequest.CONTROL_AWB_LOCK, true)
+                        if (CameraMetadata.NOISE_REDUCTION_MODE_OFF in lens.noiseReductionModes) {
+                            set(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_OFF)
+                        }
+                        if (CameraMetadata.EDGE_MODE_OFF in lens.edgeModes) set(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_OFF)
+                        setTag("burst-$i")
+                    }.build()
+                }
+                s.captureBurst(requests, burstCallback, cameraThread.handler)
+                val timeoutMs = frames.sumOf { maxOf(it.exposureNs, lens.yuvMinFrameNs) } / 1_000_000 + 4_000
+                if (withTimeoutOrNull(timeoutMs) { done.await() } == null) {
+                    AppLog.w("Camera ${lens.id}: burst delivered ${received.get()} of ${frames.size} frames in $timeoutMs ms")
+                }
+                AppLog.i("Camera ${lens.id}: burst of ${frames.size} frames done, first ${frames.firstOrNull()}")
+                minOf(received.get(), frames.size)
+            } finally {
+                reader.setOnImageAvailableListener({ r -> r.acquireLatestImage()?.close() }, imageThread.handler)
+                if (lockAf && session === s) {
+                    safely("release AF lock") {
+                        s.capture(previewRequest(CameraMetadata.CONTROL_AF_TRIGGER_CANCEL), previewCallback, cameraThread.handler)
+                    }
+                }
+                _state.update { it.copy(capturing = false) }
+            }
+        }
+    }
+
+    private val burstCallback = object : CameraCaptureSession.CaptureCallback() {
+        override fun onCaptureFailed(s: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
+            AppLog.e("Camera ${openLens?.id}: burst frame failed reason=${failure.reason} ${CameraOps.describeRequest(request)}")
+        }
+    }
+
     // ------------------------------------------------------------------ open / close
 
     private fun requestReconcile(): Job = scope.launch { mutex.withLock { reconcileLocked() } }
@@ -290,24 +420,38 @@ class CameraController(context: Context) {
         val lens = _state.value.lens
         val s = surface
         val want = resumed && lens != null && s != null && s.isValid && surfaceSize == lens.previewSize
-        if (want && device != null && openLens?.id == lens!!.id && openSurface === s) return
+        val burst = _state.value.burstSession && lens?.yuvSize != null
+        if (want && device != null && openLens?.id == lens!!.id && openSurface === s && openBurst == burst) return
         closeLocked()
         if (!want) return
         val target = lens!!
         try {
             val dev = CameraOps.openCamera(manager, target.id, cameraThread)
             device = dev
-            val reader = ImageReader.newInstance(target.jpegSize.width, target.jpegSize.height, ImageFormat.JPEG, 2)
-            reader.setOnImageAvailableListener({ r -> onJpeg(r) }, imageThread.handler)
-            jpegReader = reader
+            val reader = if (burst) {
+                val yuv = target.yuvSize!!
+                ImageReader.newInstance(yuv.width, yuv.height, ImageFormat.YUV_420_888, 3).also {
+                    it.setOnImageAvailableListener({ r -> r.acquireLatestImage()?.close() }, imageThread.handler)
+                    yuvReader = it
+                }
+            } else {
+                ImageReader.newInstance(target.jpegSize.width, target.jpegSize.height, ImageFormat.JPEG, 2).also {
+                    it.setOnImageAvailableListener({ r -> onJpeg(r) }, imageThread.handler)
+                    jpegReader = it
+                }
+            }
             session = CameraOps.createSession(
                 dev, listOf(OutputConfiguration(s!!), OutputConfiguration(reader.surface)), cameraThread,
             )
             openLens = target
             openSurface = s
+            openBurst = burst
             _state.update { it.copy(open = true, error = null) }
             startPreviewLocked()
-            AppLog.i("Camera ${target.id} preview started at ${target.previewSize}, JPEG ${target.jpegSize}")
+            AppLog.i(
+                "Camera ${target.id} preview started at ${target.previewSize}, " +
+                    if (burst) "YUV ${target.yuvSize} (burst)" else "JPEG ${target.jpegSize}",
+            )
         } catch (e: TimeoutCancellationException) {
             AppLog.e("Camera ${target.id}: open timed out", e)
             closeLocked()
@@ -329,9 +473,13 @@ class CameraController(context: Context) {
         device?.close()
         jpegReader?.setOnImageAvailableListener(null, null)
         jpegReader?.close()
+        yuvReader?.setOnImageAvailableListener(null, null)
+        yuvReader?.close()
         session = null
         device = null
         jpegReader = null
+        yuvReader = null
+        openBurst = false
         openSurface = null
         pendingJpeg?.completeExceptionally(CameraException("Camera closed"))
         if (wasOpen) AppLog.i("Camera ${openLens?.id} closed")
@@ -362,8 +510,19 @@ class CameraController(context: Context) {
         val st = _state.value
         b.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
         b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
+        if (lens.awbModes.contains(st.awbMode)) b.set(CaptureRequest.CONTROL_AWB_MODE, st.awbMode)
+        val manual = st.manualFocus
         val point = st.focusPoint
-        if (point != null) {
+        if (manual != null && lens.manualFocusAvailable) {
+            b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
+            b.set(CaptureRequest.LENS_FOCUS_DISTANCE, manual)
+            if (point != null && lens.maxAeRegions > 0) {
+                val r = CameraMath.meteringRect(
+                    CameraMath.viewToSensor(point, lens.sensorOrientation, lens.front), lens.activeArrayWidth, lens.activeArrayHeight,
+                )
+                b.set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(MeteringRectangle(r[0], r[1], r[2], r[3], MeteringRectangle.METERING_WEIGHT_MAX)))
+            }
+        } else if (point != null) {
             val sensor = CameraMath.viewToSensor(point, lens.sensorOrientation, lens.front)
             val r = CameraMath.meteringRect(sensor, lens.activeArrayWidth, lens.activeArrayHeight)
             val region = arrayOf(MeteringRectangle(r[0], r[1], r[2], r[3], MeteringRectangle.METERING_WEIGHT_MAX))
@@ -384,6 +543,11 @@ class CameraController(context: Context) {
 
     private val previewCallback = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureCompleted(s: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+            if (result.get(CaptureResult.CONTROL_AE_MODE) != CameraMetadata.CONTROL_AE_MODE_OFF) {
+                val exposure = result.get(CaptureResult.SENSOR_EXPOSURE_TIME)
+                val iso = result.get(CaptureResult.SENSOR_SENSITIVITY)
+                if (exposure != null && iso != null) lastAuto = exposure to iso
+            }
             val af = result.get(CaptureResult.CONTROL_AF_STATE) ?: return
             if (af == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED || af == CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED) {
                 afWaiter?.complete(af)
