@@ -1,0 +1,111 @@
+package com.a56cam.camera
+
+import android.graphics.ImageFormat
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CameraMetadata
+import android.util.Size
+import android.view.SurfaceHolder
+
+/** What the app needs to know about one camera, read once from CameraCharacteristics. */
+data class LensInfo(
+    val id: String,
+    val front: Boolean,
+    val zoomLabel: String,
+    val equivalentFocalMm: Float,
+    val sensorOrientation: Int,
+    val previewSize: Size,
+    val jpegSize: Size,
+    val activeArrayWidth: Int,
+    val activeArrayHeight: Int,
+    val continuousAf: Boolean,
+    val autoAf: Boolean,
+    val maxAfRegions: Int,
+    val maxAeRegions: Int,
+    val evMin: Int,
+    val evMax: Int,
+    val evStep: Float,
+    val aeLockAvailable: Boolean,
+    val awbLockAvailable: Boolean,
+    val noiseReductionModes: List<Int>,
+    val edgeModes: List<Int>,
+)
+
+/** All usable cameras, main back camera first. Cameras without JPEG or preview outputs are skipped and logged. */
+object LensCatalog {
+
+    fun load(manager: CameraManager): List<LensInfo> {
+        val raw = manager.cameraIdList.mapNotNull { id ->
+            try {
+                read(id, manager.getCameraCharacteristics(id))
+            } catch (e: Exception) {
+                AppLog.e("Camera $id: could not read characteristics", e)
+                null
+            }
+        }
+        // Main camera of each side: the one with the largest sensor (ties keep list order).
+        fun mainOf(front: Boolean) = raw.filter { it.front == front }.maxByOrNull { it.sensorArea }
+        val lenses = raw.map { r ->
+            val main = mainOf(r.front)
+            r.info.copy(zoomLabel = CameraMath.zoomLabel(r.info.equivalentFocalMm, main?.info?.equivalentFocalMm ?: 0f))
+        }
+        val mainBack = mainOf(false)?.info?.id
+        val sorted = lenses.sortedWith(compareBy<LensInfo>({ it.front }, { it.id != mainBack }, { it.equivalentFocalMm }))
+        AppLog.i("Lenses: " + sorted.joinToString { "${it.id}:${if (it.front) "front" else "back"} ${it.zoomLabel} preview ${it.previewSize} jpeg ${it.jpegSize}" })
+        return sorted
+    }
+
+    private class Raw(val info: LensInfo, val sensorArea: Float)
+
+    private fun read(id: String, c: CameraCharacteristics): Raw? {
+        val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        if (map == null) {
+            AppLog.w("Camera $id: no stream configuration map, skipped")
+            return null
+        }
+        val jpeg = map.getOutputSizes(ImageFormat.JPEG)?.maxByOrNull { it.width.toLong() * it.height }
+        if (jpeg == null) {
+            AppLog.w("Camera $id: no JPEG output, skipped")
+            return null
+        }
+        val previewCandidates = map.getOutputSizes(SurfaceHolder::class.java)?.map { CameraMath.Dim(it.width, it.height) } ?: emptyList()
+        val preview = CameraMath.choosePreviewSize(previewCandidates, CameraMath.Dim(jpeg.width, jpeg.height))
+        if (preview == null) {
+            AppLog.w("Camera $id: no preview sizes, skipped")
+            return null
+        }
+        val front = c.get(CameraCharacteristics.LENS_FACING) == CameraMetadata.LENS_FACING_FRONT
+        val focal = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: 0f
+        val sensor = c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+        val equivalent = if (sensor != null) CameraMath.equivalentFocalLength(focal, sensor.width, sensor.height) else focal
+        val array = c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+        val afModes = c.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)?.toList() ?: emptyList()
+        val evRange = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
+        val evStep = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)
+        val info = LensInfo(
+            id = id,
+            front = front,
+            zoomLabel = "1x",
+            equivalentFocalMm = equivalent,
+            sensorOrientation = c.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90,
+            previewSize = Size(preview.width, preview.height),
+            jpegSize = jpeg,
+            activeArrayWidth = array?.width() ?: jpeg.width,
+            activeArrayHeight = array?.height() ?: jpeg.height,
+            continuousAf = CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE in afModes,
+            autoAf = CameraMetadata.CONTROL_AF_MODE_AUTO in afModes,
+            maxAfRegions = c.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0,
+            maxAeRegions = c.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0,
+            evMin = evRange?.lower ?: 0,
+            evMax = evRange?.upper ?: 0,
+            evStep = evStep?.toFloat() ?: 0f,
+            aeLockAvailable = c.get(CameraCharacteristics.CONTROL_AE_LOCK_AVAILABLE) == true,
+            awbLockAvailable = c.get(CameraCharacteristics.CONTROL_AWB_LOCK_AVAILABLE) == true,
+            noiseReductionModes = c.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES)?.toList() ?: emptyList(),
+            edgeModes = c.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES)?.toList() ?: emptyList(),
+        )
+        if (!info.continuousAf) AppLog.i("Camera $id: no continuous AF (fixed focus?)")
+        if (info.evStep <= 0f) AppLog.w("Camera $id: no exposure compensation")
+        return Raw(info, (sensor?.width ?: 0f) * (sensor?.height ?: 0f))
+    }
+}
