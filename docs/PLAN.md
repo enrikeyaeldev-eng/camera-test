@@ -190,12 +190,17 @@ Status (Oct 17, 2026): **Done when met.** Build 5 installed from `latest`, the r
 
 ### Phase 1: Basic camera
 
-- [ ] Full-screen preview with correct aspect ratio and orientation.
-- [ ] Tap to focus and meter; exposure-compensation slider; AE and AWB lock.
-- [ ] Shutter button saving a single JPEG through MediaStore into DCIM/A56Cam.
-- [ ] Settings screen; front and back switching.
+- [x] Full-screen preview with correct aspect ratio and orientation.
+- [x] Tap to focus and meter; exposure-compensation slider; AE and AWB lock.
+- [x] Shutter button saving a single JPEG through MediaStore into DCIM/A56Cam.
+- [x] Settings screen; front and back switching.
 
 **Done when:** the app takes reliable single photos and survives pause, resume and rotation.
+
+Status (Oct 17, 2026): built and passing CI (with unit tests for orientation, tap mapping and preview size), **waiting for the owner's phone test**. Notes:
+- The UI is locked to portrait like the stock camera; photo orientation follows how the phone is held (JPEG orientation from the device sensor).
+- Lenses: back 1x (ID 0) and 0.6x (ID 2); front main (ID 1) and 1.2x (ID 3), labelled from 35 mm-equivalent focal lengths.
+- Settings: sharpening (default **Off**, per Phase 0), noise reduction (camera default), JPEG quality (95). The Phase 0 report lives in Settings > Device report.
 
 ### Phase 2: Samsung Extensions (only if Phase 0 found them) — skipped: no NIGHT or HDR extension
 
