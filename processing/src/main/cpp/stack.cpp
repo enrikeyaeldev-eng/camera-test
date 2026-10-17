@@ -843,6 +843,8 @@ struct Stack::Prepared {
     std::vector<float> lut;  // 0..255 YUV-domain value → 0..1 output (tone mapped, or linear for DNG)
     int ow = 0, oh = 0, rotation = 0;
     float sharpen = 0;
+    float saturation = 1.f;    // chroma scale
+    float vShift = 0.f, uShift = 0.f;  // chroma offsets (white-balance pull)
 };
 
 void Stack::renderRow(const Prepared& prep, int oy, float* rgb) const {
@@ -873,7 +875,8 @@ void Stack::renderRow(const Prepared& prep, int oy, float* rgb) const {
             luma += prep.sharpen * (luma - blur / 9.f);
         }
         const size_t c = static_cast<size_t>(sy / 2) * CW + sx / 2;
-        const float v = mergedV_[c] - 128.f, u = mergedU_[c] - 128.f;
+        const float v = (mergedV_[c] - 128.f + prep.vShift) * prep.saturation;
+        const float u = (mergedU_[c] - 128.f + prep.uShift) * prep.saturation;
         rgb[3 * ox] = tone(luma + 1.402f * v);
         rgb[3 * ox + 1] = tone(luma - 0.344136f * u - 0.714136f * v);
         rgb[3 * ox + 2] = tone(luma + 1.772f * u);
@@ -888,10 +891,41 @@ Stack::Prepared Stack::prepare(const RenderParams& p) const {
     // Undo the underexposure in linear light, then roll highlights off so the brightest input stays white
     // (extended Reinhard with white point = gain; gain 1 leaves the image unchanged).
     const float gain = std::max(1.f, p.gain);
+    const bool bright = p.look == 1;
     prep.lut.resize(4096);
     for (size_t i = 0; i < prep.lut.size(); ++i) {
         const float x = gain * srgbDecode(static_cast<float>(i) / (prep.lut.size() - 1));
-        prep.lut[i] = srgbEncode(std::min(1.f, x * (1.f + x / (gain * gain)) / (1.f + x)));
+        float t = srgbEncode(std::min(1.f, x * (1.f + x / (gain * gain)) / (1.f + x)));
+        if (bright) {
+            // Lift shadows and midtones (bright, airy), then a mild S-curve so it does not look flat.
+            t = std::pow(t, 0.85f);
+            const float s = t * t * (3.f - 2.f * t);
+            t = t + 0.18f * (s - t);
+        }
+        prep.lut[i] = t;
+    }
+    if (bright && !mergedV_.empty()) {
+        prep.saturation = 1.08f;
+        // Grey-world estimate of the remaining colour cast from mid-grey, unsaturated pixels; a quarter of it
+        // is removed, so warm light stays warm but less orange.
+        double sv = 0, su = 0;
+        long n = 0;
+        const int CW = width_ / 2, CH = height_ / 2;
+        for (int y = 0; y < CH; y += 8) {
+            for (int x = 0; x < CW; x += 8) {
+                const size_t c = static_cast<size_t>(y) * CW + x;
+                const float yy = mergedY_[static_cast<size_t>(2 * y) * width_ + 2 * x];
+                const float dv = mergedV_[c] - 128.f, du = mergedU_[c] - 128.f;
+                if (yy < 40.f || yy > 230.f || dv * dv + du * du > 30.f * 30.f) continue;
+                sv += dv;
+                su += du;
+                ++n;
+            }
+        }
+        if (n > 100) {
+            prep.vShift = -0.25f * static_cast<float>(sv / n);
+            prep.uShift = -0.25f * static_cast<float>(su / n);
+        }
     }
     return prep;
 }
@@ -909,7 +943,9 @@ void Stack::render(const RenderParams& p, const std::function<void(int, const fl
 bool Stack::writeLinearDng(const std::string& path, const RenderParams& p, const std::string& make,
                            const std::string& model) const {
     if (!processed()) return false;
-    Prepared prep = prepare(p);
+    RenderParams linear = p;
+    linear.look = 0;  // no look in the DNG: Lightroom does the styling
+    Prepared prep = prepare(linear);
     prep.sharpen = 0.f;  // leave sharpening to Lightroom
     for (size_t i = 0; i < prep.lut.size(); ++i) prep.lut[i] = srgbDecode(static_cast<float>(i) / (prep.lut.size() - 1));
     const double baselineExposure = std::log2(std::max(1.f, p.gain));

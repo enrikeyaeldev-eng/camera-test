@@ -36,11 +36,12 @@ std::string str(JNIEnv* env, jstring s) {
     return out;
 }
 
-a56::RenderParams params(jfloat gain, jfloat sharpen, jint rotation) {
+a56::RenderParams params(jfloat gain, jfloat sharpen, jint rotation, jint look = 0) {
     a56::RenderParams p;
     p.gain = gain;
     p.sharpen = sharpen;
     p.rotation = rotation;
+    p.look = look;
     return p;
 }
 
@@ -157,7 +158,7 @@ Java_com_a56cam_processing_StackNative_outputSize(JNIEnv* env, jobject, jlong h,
 
 JNIEXPORT jboolean JNICALL
 Java_com_a56cam_processing_StackNative_renderBitmap(JNIEnv* env, jobject, jlong h, jobject bitmap, jfloat gain,
-                                                    jfloat sharpen, jint rotation) {
+                                                    jfloat sharpen, jint rotation, jint look) {
     Handle* hd = from(h);
     AndroidBitmapInfo info;
     if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS ||
@@ -173,15 +174,15 @@ Java_com_a56cam_processing_StackNative_renderBitmap(JNIEnv* env, jobject, jlong 
     }
     void* pixels = nullptr;
     if (AndroidBitmap_lockPixels(env, bitmap, &pixels) != ANDROID_BITMAP_RESULT_SUCCESS) return JNI_FALSE;
-    hd->stack.renderRgba8(static_cast<uint8_t*>(pixels), static_cast<int>(info.stride), params(gain, sharpen, rotation));
+    hd->stack.renderRgba8(static_cast<uint8_t*>(pixels), static_cast<int>(info.stride), params(gain, sharpen, rotation, look));
     AndroidBitmap_unlockPixels(env, bitmap);
     return JNI_TRUE;
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_a56cam_processing_StackNative_writeTiff(JNIEnv* env, jobject, jlong h, jstring path, jfloat gain,
-                                                 jfloat sharpen, jint rotation) {
-    return from(h)->stack.writeTiff16(str(env, path), params(gain, sharpen, rotation)) ? JNI_TRUE : JNI_FALSE;
+                                                 jfloat sharpen, jint rotation, jint look) {
+    return from(h)->stack.writeTiff16(str(env, path), params(gain, sharpen, rotation, look)) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL

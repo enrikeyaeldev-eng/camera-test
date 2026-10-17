@@ -17,6 +17,12 @@ class AppSettings(context: Context) {
         BOTH("JPEG + DNG + TIFF"),
     }
 
+    /** Colour and tone style of merged photos. */
+    enum class Look(val label: String, val code: Int) {
+        BRIGHT("Bright & natural (iPhone-style)", 1),
+        NATURAL("Neutral (camera tones)", 0),
+    }
+
     data class Values(
         /** A CameraMetadata NOISE_REDUCTION_MODE_* value, or [CAMERA_DEFAULT]. */
         val noiseReduction: Int = CAMERA_DEFAULT,
@@ -24,7 +30,8 @@ class AppSettings(context: Context) {
         val edge: Int = CameraMetadata.EDGE_MODE_OFF,
         val jpegQuality: Int = 95,
         val lastLensId: String? = null,
-        val mode: String = CaptureMode.PHOTO.name,
+        val mode: String = CaptureMode.STACK.name,
+        val look: Look = Look.BRIGHT,
         val stackFrames: Int = 8,
         val nightFrames: Int = 12,
         val rawOutput: RawOutput = RawOutput.DNG,
@@ -53,6 +60,7 @@ class AppSettings(context: Context) {
             .putInt("jpegQuality", v.jpegQuality)
             .putString("lastLensId", v.lastLensId)
             .putString("mode", v.mode)
+            .putString("look", v.look.name)
             .putInt("stackFrames", v.stackFrames)
             .putInt("nightFrames", v.nightFrames)
             .putString("rawOutput", v.rawOutput.name)
@@ -71,6 +79,7 @@ class AppSettings(context: Context) {
             jpegQuality = prefs.getInt("jpegQuality", d.jpegQuality),
             lastLensId = prefs.getString("lastLensId", null),
             mode = prefs.getString("mode", d.mode) ?: d.mode,
+            look = prefs.getString("look", null)?.let { name -> Look.entries.firstOrNull { it.name == name } } ?: d.look,
             stackFrames = prefs.getInt("stackFrames", d.stackFrames),
             nightFrames = prefs.getInt("nightFrames", d.nightFrames),
             rawOutput = prefs.getString("rawOutput", null)?.let { name -> RawOutput.entries.firstOrNull { it.name == name } }

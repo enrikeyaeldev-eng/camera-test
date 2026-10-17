@@ -44,13 +44,11 @@ object BurstPlanner {
                 val f = frameFor(target, maxOf(autoExposureNs.toDouble(), longest), limits)
                 Plan(kind, List(frameCount) { f }, gain(auto, f), minSharpness = 0.7f)
             }
-            // -2, 0 and +1.5 EV around auto, changing the shutter first and ISO only when the shutter runs out.
+            // HDR+ style: identical frames 2 EV under auto so highlights are not clipped; merging them removes the
+            // noise and the tone curve then lifts the shadows by 4×. No mixed exposures, so no halos or ghosts.
             Kind.HDR -> {
-                val frames = listOf(-2.0, 0.0, 1.5).map { ev ->
-                    val factor = 2.0.pow(ev)
-                    frameFor(auto * factor, autoExposureNs * factor, limits)
-                }
-                Plan(kind, frames, gain = 1f, minSharpness = 0f)
+                val f = frameFor(auto * 0.25, autoExposureNs * 0.25, limits)
+                Plan(kind, List(frameCount) { f }, gain(auto, f), minSharpness = 0f)
             }
         }
     }

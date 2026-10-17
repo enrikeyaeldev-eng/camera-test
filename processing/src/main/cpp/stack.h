@@ -40,6 +40,9 @@ struct RenderParams {
     float gain = 2.0f;     // linear gain that undoes the burst's underexposure
     float sharpen = 0.4f;  // unsharp-mask amount on luma
     int rotation = 0;      // clockwise: 0, 90, 180 or 270
+    // 0 = natural; 1 = bright, iPhone-style: lifted midtones, gentle contrast, +8 % saturation and the
+    // white balance pulled a quarter of the way to neutral.
+    int look = 0;
 };
 
 class Stack {

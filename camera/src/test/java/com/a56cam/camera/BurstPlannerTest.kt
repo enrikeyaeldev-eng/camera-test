@@ -39,20 +39,11 @@ class BurstPlannerTest {
     }
 
     @Test
-    fun hdr_bracketsMinusTwoZeroPlusOneAndHalf() {
-        val p = BurstPlanner.plan(Kind.HDR, 10_000_000, 200, a56, 3)
-        val products = p.frames.map { it.product / (10_000_000.0 * 200) }
-        assertEquals(0.25, products[0], 0.01)
-        assertEquals(1.0, products[1], 0.01)
-        assertEquals(2.83, products[2], 0.03)
-        assertEquals(1f, p.gain, 0f)
-    }
-
-    @Test
-    fun hdr_raisesIsoWhenShutterRunsOut() {
-        val p = BurstPlanner.plan(Kind.HDR, 80_000_000, 400, a56, 3)
-        val bright = p.frames[2]
-        assertEquals(100_000_000L, bright.exposureNs)
-        assertTrue("iso ${bright.iso}", bright.iso > 400)
+    fun hdr_isTwoStopsUnderWithGainFour() {
+        val p = BurstPlanner.plan(Kind.HDR, 41_650_000, 1430, a56, 10)
+        assertEquals(10, p.frames.size)
+        assertEquals(10_412_500L, p.frames[0].exposureNs)
+        assertEquals(1430, p.frames[0].iso)
+        assertEquals(4f, p.gain, 0.01f)
     }
 }

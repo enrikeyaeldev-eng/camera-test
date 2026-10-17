@@ -139,7 +139,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
         val count = when (kind) {
             BurstPlanner.Kind.STACK -> v.stackFrames
             BurstPlanner.Kind.NIGHT -> v.nightFrames
-            BurstPlanner.Kind.HDR -> 3
+            BurstPlanner.Kind.HDR -> HDR_FRAMES
         }
         val plan = BurstPlanner.plan(kind, autoExposure, autoIso, lens.burstLimits, count)
         AppLog.i("Burst $kind on camera ${lens.id}: auto ${autoExposure}ns ISO $autoIso -> ${plan.frames} gain ${plan.gain}")
@@ -152,7 +152,7 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
             if (stack.count == 0) throw IllegalStateException("No frames were captured")
             AppLog.i("Burst captured ${stack.count} of ${plan.frames.size} frames (delivered $delivered)")
             _photo.update {
-                it.copy(status = if (kind == BurstPlanner.Kind.HDR) "Fusing exposures…" else "Merging ${stack.count} frames…")
+                it.copy(status = "Merging ${stack.count} frames…")
             }
 
             val result = withContext(Dispatchers.Default) {
@@ -160,16 +160,17 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                 val debugDir = "${Environment.DIRECTORY_DCIM}/A56Cam/debug"
                 if (v.debug) saveSourceFrames(stack, base, debugDir)
                 val started = System.currentTimeMillis()
-                val stats = stack.process(plan.minSharpness, hdr = kind == BurstPlanner.Kind.HDR)
+                // All modes merge same-exposure frames; HDR differs only in its deeper underexposure and gain.
+                val stats = stack.process(plan.minSharpness, hdr = false)
                 val rotation = CameraMath.jpegOrientation(lens.sensorOrientation, deviceOrientation, lens.front)
-                val bitmap = stack.renderBitmap(rotation, plan.gain, SHARPEN)
+                val bitmap = stack.renderBitmap(rotation, plan.gain, SHARPEN, v.look.code)
                 val jpeg = ByteArrayOutputStream().also { bitmap.compress(Bitmap.CompressFormat.JPEG, v.jpegQuality, it) }.toByteArray()
                 val uri = PhotoStore.saveJpeg(app, jpeg, "$base.jpg")
                 if (v.rawOutput == AppSettings.RawOutput.DNG || v.rawOutput == AppSettings.RawOutput.BOTH) {
                     saveLarge(app, "$base.dng", "image/x-adobe-dng") { stack.writeDng(it, rotation, plan.gain, Build.MANUFACTURER, Build.MODEL) }
                 }
                 if (v.rawOutput == AppSettings.RawOutput.TIFF || v.rawOutput == AppSettings.RawOutput.BOTH) {
-                    saveLarge(app, "$base.tif", "image/tiff") { stack.writeTiff(it, rotation, plan.gain, SHARPEN) }
+                    saveLarge(app, "$base.tif", "image/tiff") { stack.writeTiff(it, rotation, plan.gain, SHARPEN, v.look.code) }
                 }
                 val totalMs = System.currentTimeMillis() - started
                 AppLog.i("Burst $kind saved $uri in $totalMs ms after capture; stats ${stats.json}")
@@ -242,5 +243,6 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
     private companion object {
         /** Gentle unsharp mask after merging; Samsung's own sharpening is off for burst frames. */
         const val SHARPEN = 0.35f
+        const val HDR_FRAMES = 10
     }
 }

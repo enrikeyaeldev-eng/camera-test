@@ -23,8 +23,8 @@ internal object StackNative {
     external fun process(handle: Long, minSharpness: Float, hdr: Boolean): String?
     external fun tileWeights(handle: Long): FloatArray
     external fun outputSize(handle: Long, rotation: Int): IntArray
-    external fun renderBitmap(handle: Long, bitmap: Bitmap, gain: Float, sharpen: Float, rotation: Int): Boolean
-    external fun writeTiff(handle: Long, path: String, gain: Float, sharpen: Float, rotation: Int): Boolean
+    external fun renderBitmap(handle: Long, bitmap: Bitmap, gain: Float, sharpen: Float, rotation: Int, look: Int): Boolean
+    external fun writeTiff(handle: Long, path: String, gain: Float, sharpen: Float, rotation: Int, look: Int): Boolean
     external fun writeDng(handle: Long, path: String, gain: Float, rotation: Int, make: String, model: String): Boolean
     external fun frameNv21(handle: Long, index: Int): ByteArray?
 }
@@ -75,15 +75,16 @@ class StackProcessor(val width: Int, val height: Int, capacity: Int) : AutoClose
 
     fun outputSize(rotation: Int): Pair<Int, Int> = StackNative.outputSize(live(), rotation).let { it[0] to it[1] }
 
-    fun renderBitmap(rotation: Int, gain: Float, sharpen: Float): Bitmap {
+    /** [look]: 0 natural, 1 bright iPhone-style (see RenderParams in stack.h). */
+    fun renderBitmap(rotation: Int, gain: Float, sharpen: Float, look: Int): Bitmap {
         val (w, h) = outputSize(rotation)
         val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        check(StackNative.renderBitmap(live(), bitmap, gain, sharpen, rotation)) { "Rendering the stacked image failed" }
+        check(StackNative.renderBitmap(live(), bitmap, gain, sharpen, rotation, look)) { "Rendering the stacked image failed" }
         return bitmap
     }
 
-    fun writeTiff(file: File, rotation: Int, gain: Float, sharpen: Float): Boolean =
-        StackNative.writeTiff(live(), file.absolutePath, gain, sharpen, rotation)
+    fun writeTiff(file: File, rotation: Int, gain: Float, sharpen: Float, look: Int): Boolean =
+        StackNative.writeTiff(live(), file.absolutePath, gain, sharpen, rotation, look)
 
     fun writeDng(file: File, rotation: Int, gain: Float, make: String, model: String): Boolean =
         StackNative.writeDng(live(), file.absolutePath, gain, rotation, make, model)

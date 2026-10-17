@@ -211,6 +211,28 @@ int main() {
         check(darkOut < darkRef / 2, "HDR lifts most crushed shadows", static_cast<double>(darkOut) / std::max(1L, darkRef));
     }
 
+    // --- Bright (iPhone-style) look: brighter midtones, still monotonic, white stays white.
+    {
+        Stack ramp(W, H, 1);
+        for (int yy = 0; yy < H; ++yy)
+            for (int xx = 0; xx < W; ++xx) y[yy * W + xx] = static_cast<uint8_t>(xx * 255 / (W - 1));
+        for (int k = 0; k < W / 2 * H / 2; ++k) { u[k] = 128; v[k] = 128; }
+        ramp.addFrame(y.data(), W, 1, u.data(), v.data(), W / 2, 1, 0);
+        ramp.process();
+        a56::RenderParams natural, bright;
+        natural.gain = bright.gain = 1.f;
+        natural.sharpen = bright.sharpen = 0.f;
+        bright.look = 1;
+        std::vector<float> rn(W), rb(W);
+        ramp.render(natural, [&](int row, const float* rgb) { if (row == H / 2) for (int x = 0; x < W; ++x) rn[x] = rgb[3 * x + 1]; });
+        ramp.render(bright, [&](int row, const float* rgb) { if (row == H / 2) for (int x = 0; x < W; ++x) rb[x] = rgb[3 * x + 1]; });
+        bool monotonic = true;
+        for (int x = 1; x < W; ++x) monotonic = monotonic && rb[x] >= rb[x - 1] - 1e-4f;
+        check(monotonic, "bright look keeps tones in order", 0);
+        check(rb[W / 2] > rn[W / 2] + 0.03f, "bright look lifts midtones", rb[W / 2] - rn[W / 2]);
+        check(rb[W - 1] > 0.99f && rb[0] < 0.01f, "bright look keeps black black and white white", rb[W - 1]);
+    }
+
     // --- Glitches seen on the phone: blocks on smooth gradients and HDR ghosts.
     {
         // Smooth radial glow (like a lamp on a wall) with only a little texture at the edges, plus noise.

@@ -77,10 +77,19 @@ fun SettingsScreen(
             }
         }
 
+        Section("Look (Stack, Night, HDR)") {
+            Text(
+                "Bright brightens shadows and midtones, adds a little contrast and colour, and makes indoor light " +
+                    "less orange. Photo mode keeps Samsung's own processing.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            AppSettings.Look.entries.forEach { l -> Choice(l.label, values.look == l) { settings.update { it.copy(look = l) } } }
+        }
+
         Section("Burst modes (Stack, Night, HDR)") {
             Text(
                 "Stack merges frames taken 1 stop darker to protect highlights; Night uses up to 1/10 s per frame " +
-                    "and drops shaken frames; HDR fuses -2, 0 and +1.5 EV.",
+                    "and drops shaken frames; HDR merges 10 frames taken 2 stops darker, then lifts the shadows.",
                 style = MaterialTheme.typography.bodySmall,
             )
             Text("Stack frames", style = MaterialTheme.typography.labelLarge)
