@@ -176,7 +176,17 @@ Status (Oct 17, 2026): **Done when met.** Build 5 installed from `latest`, the r
 | NR and edge modes | OFF, FAST and HIGH_QUALITY listed for both. | Whether they are honoured is **not yet measured**: see the bug below. |
 | High-speed video | Back main: 1280 × 720 up to 240 fps. Ultrawide: none. | Relevant to the video idea below. |
 
-**Diagnostics bug (fixed, needs a re-run):** at 30 fps the app stopped pairing frames with their results. That left gaps in the 1/1000 to 1/60 s exposure points, ISO 400 and above, all of EV bracketing, all NR/edge crops and the full-size reference frame. The owner's app log confirmed the cause. Reading YUV pixels one byte at a time took longer than a frame (33 ms), so images queued up and their results fell out of the 12-entry pairing buffer. The fix reads whole rows in bulk, keeps up to 90 unpaired results, and records per-frame analysis time in the report. The report now also runs the live tests on every camera (IDs 0 to 3), not only the main back camera. **Lesson for Phase 3:** never touch frame pixels per byte from Kotlin; copy rows in bulk or in C++.
+**Second run (build 9, run 20261016-202217, all four cameras, 0 errors):** the 30 fps pairing bug is fixed (0 unpaired frames or results). The cause was per-byte YUV reads in Kotlin. Frame analysis still averages 41 to 50 ms per full-size frame even with bulk row reads, so a few images are still dropped in some burst variants. **Lesson for Phase 3:** never touch frame pixels from Kotlin; copy buffers straight into native memory and process in C++.
+
+| Question (all cameras unless noted) | Answer | Consequence |
+| --- | --- | --- |
+| Manual exposure and ISO | Honoured exactly on **all four cameras**, from the first frame after the change (1 ms to 100 ms, ISO up to each camera's max). Brightness tracks both. | Per-frame manual exposure is usable for night stacking and for HDR brackets. Check it per frame inside one `captureBurst` in Phase 3. |
+| EV compensation | Works but is slow: 8 to 17 frames (0.3 to 0.6 s) to settle. Back main: -2 EV gives 0.33× luma, +2 EV 1.52×. Front cameras at +2 EV did not brighten, because auto AE was already at ISO 3200 and 1/30 s indoors. | Bracket with manual exposure, not EV compensation. |
+| Auto AE in dim light | Stays at 1/30 s and raises ISO (back main ISO 538 at 0 EV indoors, front ISO 3200). | Night mode should pick its own exposure: longer (up to 100 ms) at lower ISO. |
+| Noise reduction | OFF and FAST give the same result (back main crop gradient 16.0 vs 16.1). HIGH_QUALITY smooths strongly (9.6). | Stacking input: NR OFF. FAST is no cleaner, so it is free. |
+| Edge (sharpening) | OFF and FAST are the same; HIGH_QUALITY sharpens hard (gradient 16 → 36). | Stacking input and the clean single frame: edge OFF. Sharpen ourselves after the merge. |
+| Burst | 29.7 to 29.9 fps on every camera with the PREVIEW template; front ID 3 also with STILL_CAPTURE. | Confirms the PREVIEW template for burst frames. |
+| Extensions on front cameras | FACE_RETOUCH and BOKEH work but take ~2.9 s (back: ~0.4 to 0.5 s). | Not needed; Phase 2 stays skipped. |
 
 ### Phase 1: Basic camera
 
