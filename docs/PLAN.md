@@ -244,6 +244,10 @@ Status (Oct 17, 2026): built, waiting for the owner's phone test.
 
 - **HDR glitches (fixed, build after 16):** owner photos showed double images (laptop screen) and blocky patches (lamp glow, bedsheet). Causes: no deghosting in exposure fusion, and per-tile shifts on surfaces without detail. Fixes: HDR uses one shift per bracket from detailed, well-exposed tiles; flat tiles in Stack/Night take the frame's overall shift; ghosted areas take the reference's content (brightness-matched) before fusion weights are computed. Host test: a moving bright object now adds 0.04 levels instead of 27.
 
+- **HDR redesigned (owner test, Oct 17):** bracket fusion gave halos and heavy grain indoors: the +1.5 EV bracket hit 1/10 s at ISO 2,700–3,200 on the front camera. HDR now uses the HDR+ approach: 10 identical frames at -2 EV, merged like Stack, then 4× shadow lift with highlight roll-off. The bracket-fusion code stays in the native core (tested) for a possible daylight mode.
+- **Green photo, follow-up:** the logs show that shot was taken with the EV slider at -2.0 (and HQ sharpening), which explains its darkness; the colour cast is still unconfirmed. Later Photo-mode shots were all normal.
+- **Owner goal (Oct 17): the iPhone look of the photo itself.** The new "Bright" look (default for burst modes): lifted shadows and midtones, mild S-curve, +8 % saturation, white balance pulled 25 % toward neutral (warm light stays warm, less orange). Stack is now the default mode, since iPhones always shoot multi-frame.
+
 ## Ideas for later (not scheduled)
 
 Raised by the owner on Oct 17, 2026. Consider them when planning each phase; neither changes Phases 1 to 3.
