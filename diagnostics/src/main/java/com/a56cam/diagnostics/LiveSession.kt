@@ -62,6 +62,13 @@ internal class LiveSession private constructor(
 
     /** Side of the centre crop copied from each frame; 0 copies nothing. */
     @Volatile var cropSize = 0
+    @Volatile private var closing = false
+    private var framesAnalysed = 0L
+    private var analysisNsTotal = 0L
+    private var analysisNsMax = 0L
+    private var resultsEvicted = 0
+    private var framesEvicted = 0
+
     /** When set, the next frame is copied in full (about 18.7 MB at 4080 × 3060). */
     val fullCopyRequested = AtomicBoolean(false)
 
@@ -99,6 +106,11 @@ internal class LiveSession private constructor(
             AppLog.w("Camera $cameraId acquireNextImage failed", e)
             null
         } ?: return
+        if (closing) {
+            image.close()
+            return
+        }
+        val startNs = System.nanoTime()
         val info = try {
             val crop = cropSize.takeIf { it > 0 }?.let { Yuv.copyNv21(image, Yuv.centerRect(image.width, image.height, it)) }
             val full = if (fullCopyRequested.compareAndSet(true, false)) {
@@ -108,10 +120,17 @@ internal class LiveSession private constructor(
             }
             FrameInfo(image.timestamp, image.width, image.height, Yuv.meanLuma(image), crop, full)
         } catch (e: Exception) {
-            AppLog.e("Camera $cameraId frame analysis failed", e)
+            // Closing the session can invalidate buffers mid-read; that is expected, not a failure.
+            if (!closing) AppLog.e("Camera $cameraId frame analysis failed", e)
             null
         } finally {
             image.close()
+        }
+        val tookNs = System.nanoTime() - startNs
+        synchronized(lock) {
+            framesAnalysed++
+            analysisNsTotal += tookNs
+            if (tookNs > analysisNsMax) analysisNsMax = tookNs
         }
         if (info != null) onFrame(info)
     }
@@ -124,7 +143,10 @@ internal class LiveSession private constructor(
             emit(Sample(match, frame))
         } else {
             unmatchedFrames.addLast(frame)
-            while (unmatchedFrames.size > MAX_UNMATCHED) unmatchedFrames.removeFirst()
+            while (unmatchedFrames.size > MAX_UNMATCHED_FRAMES) {
+                unmatchedFrames.removeFirst()
+                framesEvicted++
+            }
         }
     }
 
@@ -141,7 +163,10 @@ internal class LiveSession private constructor(
             emit(Sample(result, match))
         } else {
             unmatchedResults.addLast(result)
-            while (unmatchedResults.size > MAX_UNMATCHED) unmatchedResults.removeFirst()
+            while (unmatchedResults.size > MAX_UNMATCHED_RESULTS) {
+                unmatchedResults.removeFirst()
+                resultsEvicted++
+            }
         }
     }
 
@@ -204,19 +229,35 @@ internal class LiveSession private constructor(
         return log
     }
 
+    /** How long frame analysis took and how many frames or results could not be paired. */
+    fun frameStats(): org.json.JSONObject = synchronized(lock) {
+        org.json.JSONObject()
+            .put("framesAnalysed", framesAnalysed)
+            .put("meanAnalysisMs", if (framesAnalysed > 0) Math.round(analysisNsTotal / framesAnalysed / 10_000.0) / 100.0 else 0.0)
+            .put("maxAnalysisMs", Math.round(analysisNsMax / 10_000.0) / 100.0)
+            .put("unpairedResultsDropped", resultsEvicted)
+            .put("unpairedFramesDropped", framesEvicted)
+    }
+
     override fun close() {
+        closing = true
+        AppLog.i("Camera $cameraId frame stats: ${frameStats()}")
         try {
             session.close()
         } catch (e: Exception) {
             AppLog.w("Camera $cameraId session close failed", e)
         }
         device.close()
+        reader.setOnImageAvailableListener(null, null)
         reader.close()
         AppLog.d("Camera $cameraId live session closed")
     }
 
     companion object {
-        private const val MAX_UNMATCHED = 12
+        // Results are small, so keep many: frames can arrive several hundred ms after their result.
+        private const val MAX_UNMATCHED_RESULTS = 90
+        // Frames may carry crops (up to 1.5 MB each), so keep fewer.
+        private const val MAX_UNMATCHED_FRAMES = 12
 
         suspend fun open(
             manager: CameraManager,

@@ -101,6 +101,7 @@ internal class LiveTests(
                 }
                 session.stopRepeating()
                 out.put("variants", variants)
+                out.put("frameStats", frameStats())
             }
         }
     }
@@ -195,6 +196,7 @@ internal class LiveTests(
                 out.put("isoHonoured", allClose(isoSweep, "requestedIso", "resultIso"))
                 out.put("brightnessFollowsExposure", monotonicLuma(exposureSweep))
                 out.put("brightnessFollowsIso", monotonicLuma(isoSweep))
+                out.put("frameStats", frameStats())
             }
         }
     }
@@ -318,6 +320,7 @@ internal class LiveTests(
                 }
                 session.stopRepeating()
                 out.put("series", series)
+                out.put("frameStats", frameStats())
             }
         }
     }
@@ -396,6 +399,7 @@ internal class LiveTests(
                 }
                 session.stopRepeating()
                 out.put("captures", results)
+                out.put("frameStats", frameStats())
             }
         }
     }

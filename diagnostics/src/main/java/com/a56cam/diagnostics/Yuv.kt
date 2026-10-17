@@ -24,20 +24,30 @@ internal class FrameInfo(
 
 internal object Yuv {
 
+    /** Reusable row buffers for the image thread; bulk row reads are far faster than per-byte ByteBuffer.get(). */
+    private val rowA = ThreadLocal<ByteArray>()
+    private val rowB = ThreadLocal<ByteArray>()
+
+    private fun row(local: ThreadLocal<ByteArray>, size: Int): ByteArray =
+        local.get()?.takeIf { it.size >= size } ?: ByteArray(size).also { local.set(it) }
+
     /** Mean of the Y plane, sampled every [step] pixels in both directions (0..255). */
     fun meanLuma(image: Image, step: Int = 8): Double {
         val plane = image.planes[0]
-        val buf = plane.buffer
+        val buf = plane.buffer.duplicate()
         val rowStride = plane.rowStride
         val pixelStride = plane.pixelStride
+        val rowLen = (image.width - 1) * pixelStride + 1
+        val line = row(rowA, rowLen)
         var sum = 0L
         var count = 0L
         var y = 0
         while (y < image.height) {
+            buf.position(y * rowStride)
+            buf.get(line, 0, rowLen)
             var x = 0
-            val rowBase = y * rowStride
             while (x < image.width) {
-                sum += buf.get(rowBase + x * pixelStride).toInt() and 0xFF
+                sum += line[x * pixelStride].toInt() and 0xFF
                 count++
                 x += step
             }
@@ -68,23 +78,34 @@ internal object Yuv {
                 yBuf.get(out, row * w, w)
             }
         } else {
-            for (row in 0 until h) for (col in 0 until w) {
-                out[row * w + col] = yBuf.get((rect.top + row) * yPlane.rowStride + (rect.left + col) * yPlane.pixelStride)
+            val len = (w - 1) * yPlane.pixelStride + 1
+            val line = row(rowA, len)
+            for (r in 0 until h) {
+                yBuf.position((rect.top + r) * yPlane.rowStride + rect.left * yPlane.pixelStride)
+                yBuf.get(line, 0, len)
+                for (c in 0 until w) out[r * w + c] = line[c * yPlane.pixelStride]
             }
         }
         val uPlane = image.planes[1]
         val vPlane = image.planes[2]
-        val uBuf = uPlane.buffer
-        val vBuf = vPlane.buffer
+        val uBuf = uPlane.buffer.duplicate()
+        val vBuf = vPlane.buffer.duplicate()
         val cTop = rect.top / 2
         val cLeft = rect.left / 2
+        val cw = w / 2
+        val uLen = (cw - 1) * uPlane.pixelStride + 1
+        val vLen = (cw - 1) * vPlane.pixelStride + 1
+        val uRow = row(rowA, uLen)
+        val vRow = row(rowB, vLen)
         var dst = w * h
-        for (row in 0 until h / 2) {
-            val uRow = (cTop + row) * uPlane.rowStride
-            val vRow = (cTop + row) * vPlane.rowStride
-            for (col in 0 until w / 2) {
-                out[dst++] = vBuf.get(vRow + (cLeft + col) * vPlane.pixelStride)
-                out[dst++] = uBuf.get(uRow + (cLeft + col) * uPlane.pixelStride)
+        for (r in 0 until h / 2) {
+            uBuf.position((cTop + r) * uPlane.rowStride + cLeft * uPlane.pixelStride)
+            uBuf.get(uRow, 0, uLen)
+            vBuf.position((cTop + r) * vPlane.rowStride + cLeft * vPlane.pixelStride)
+            vBuf.get(vRow, 0, vLen)
+            for (c in 0 until cw) {
+                out[dst++] = vRow[c * vPlane.pixelStride]
+                out[dst++] = uRow[c * uPlane.pixelStride]
             }
         }
         return Nv21(w, h, out)
