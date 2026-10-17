@@ -15,6 +15,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -76,12 +77,41 @@ fun SettingsScreen(
             }
         }
 
+        Section("Burst modes (Stack, Night, HDR)") {
+            Text(
+                "Stack merges frames taken 1 stop darker to protect highlights; Night uses up to 1/10 s per frame " +
+                    "and drops shaken frames; HDR fuses -2, 0 and +1.5 EV.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text("Stack frames", style = MaterialTheme.typography.labelLarge)
+            listOf(4, 8, 12).forEach { n -> Choice("$n", values.stackFrames == n) { settings.update { it.copy(stackFrames = n) } } }
+            Text("Night frames", style = MaterialTheme.typography.labelLarge)
+            listOf(8, 12, 16).forEach { n -> Choice("$n", values.nightFrames == n) { settings.update { it.copy(nightFrames = n) } } }
+            Text("File for Lightroom (burst modes, about 75 MB each)", style = MaterialTheme.typography.labelLarge)
+            AppSettings.RawOutput.entries.forEach { r ->
+                Choice(r.label, values.rawOutput == r) { settings.update { it.copy(rawOutput = r) } }
+            }
+        }
+
+        Section("Shutter and display") {
+            Toggle("Volume keys and Bluetooth remotes take photos", values.volumeShutter) { on ->
+                settings.update { it.copy(volumeShutter = on) }
+            }
+            Toggle("Grid", values.grid) { on -> settings.update { it.copy(grid = on) } }
+        }
+
         Section("Diagnostics") {
+            Toggle("Debug: save source frames, merge map and stats", values.debug) { on ->
+                settings.update { it.copy(debug = on) }
+            }
             OutlinedButton(onClick = onDeviceReport, modifier = Modifier.fillMaxWidth()) { Text("Device report") }
             OutlinedButton(onClick = onShareLogs, modifier = Modifier.fillMaxWidth()) { Text("Share logs") }
         }
 
-        Text("Photos are saved to ${PhotoStore.RELATIVE_PATH}.", style = MaterialTheme.typography.bodySmall)
+        Text(
+            "Photos are saved to ${PhotoStore.RELATIVE_PATH}; debug files to DCIM/A56Cam/debug and Documents/A56Cam/debug.",
+            style = MaterialTheme.typography.bodySmall,
+        )
         Text("A56Cam $version", style = MaterialTheme.typography.bodySmall)
     }
 }
@@ -102,6 +132,20 @@ private fun Section(title: String, content: @Composable () -> Unit) {
     HorizontalDivider()
     Text(title, style = MaterialTheme.typography.titleMedium)
     content()
+}
+
+@Composable
+private fun Toggle(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .selectable(selected = checked, onClick = { onChange(!checked) }, role = Role.Switch)
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, modifier = Modifier.weight(1f))
+        Switch(checked = checked, onCheckedChange = null)
+    }
 }
 
 @Composable

@@ -1,6 +1,7 @@
 package com.a56cam.app
 
 import android.content.Intent
+import android.hardware.camera2.CameraMetadata
 import android.util.Size
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -12,6 +13,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,8 +26,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
@@ -34,7 +38,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -54,12 +61,19 @@ import com.a56cam.camera.AppLog
 import com.a56cam.camera.CameraController
 import com.a56cam.camera.CameraController.FocusState
 import com.a56cam.camera.CameraMath
+import com.a56cam.camera.LensInfo
 import java.util.Locale
+
+private val Accent = Color(0xFFFFD54F)
+private val Chip = Color(0x33FFFFFF)
 
 @Composable
 fun CameraScreen(vm: CameraViewModel, deviceOrientation: () -> Int, onOpenSettings: () -> Unit) {
     val st by vm.controller.state.collectAsState()
     val photo by vm.photo.collectAsState()
+    val mode by vm.mode.collectAsState()
+    val settings by vm.settings.values.collectAsState()
+    var manualOpen by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
     val lens = st.lens
 
@@ -69,18 +83,19 @@ fun CameraScreen(vm: CameraViewModel, deviceOrientation: () -> Int, onOpenSettin
             .background(Color.Black)
             .safeDrawingPadding(),
     ) {
-        // Top bar: settings and the two locks.
+        // Top bar.
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             TextButton(onClick = onOpenSettings) { Text("Settings", color = Color.White) }
-            Row {
-                LockChip("AE lock", st.aeLock, lens?.aeLockAvailable == true) { vm.controller.setAeLock(!st.aeLock) }
-                Spacer(Modifier.size(8.dp))
-                LockChip("WB lock", st.awbLock, lens?.awbLockAvailable == true) { vm.controller.setAwbLock(!st.awbLock) }
+            ChipText(if (settings.timerSeconds == 0) "Timer off" else "Timer ${settings.timerSeconds}s", settings.timerSeconds > 0) {
+                vm.cycleTimer()
             }
+            ChipText("Manual", manualOpen) { manualOpen = !manualOpen }
+            ChipText("AE lock", st.aeLock, enabled = lens?.aeLockAvailable == true) { vm.controller.setAeLock(!st.aeLock) }
+            ChipText("WB lock", st.awbLock, enabled = lens?.awbLockAvailable == true) { vm.controller.setAwbLock(!st.awbLock) }
         }
 
         // Preview, exactly the shape of the photo (4:3 portrait on this phone).
@@ -96,28 +111,35 @@ fun CameraScreen(vm: CameraViewModel, deviceOrientation: () -> Int, onOpenSettin
                         .fillMaxSize()
                         .pointerInput(lens.id) {
                             detectTapGestures(
-                                onTap = { o ->
-                                    vm.controller.focusAt(CameraMath.Point(o.x / size.width, o.y / size.height))
-                                },
+                                onTap = { o -> vm.controller.focusAt(CameraMath.Point(o.x / size.width, o.y / size.height)) },
                                 onLongPress = { vm.controller.resetFocus() },
                             )
                         },
                 )
+                if (settings.grid) Grid()
                 FocusRing(st)
             }
             ShutterFlash(photo.shots)
-            val status = st.error ?: if (!st.open) "Starting camera…" else null
-            status?.let {
-                Text(
-                    it,
-                    color = Color.White,
-                    modifier = Modifier.align(Alignment.Center).background(Color(0x99000000)).padding(12.dp),
-                )
+            val status = st.error ?: if (!st.open) "Starting camera…" else photo.status
+            if (status != null || photo.countdown > 0) {
+                Column(
+                    modifier = Modifier.align(Alignment.Center).background(Color(0x99000000), RoundedCornerShape(12.dp)).padding(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    if (photo.countdown > 0) {
+                        Text("${photo.countdown}", color = Color.White, fontSize = 64.sp, fontWeight = FontWeight.Bold)
+                    } else {
+                        if (photo.status != null) CircularProgressIndicator(color = Color.White)
+                        Text(status ?: "", color = Color.White, modifier = Modifier.padding(top = 8.dp))
+                    }
+                }
             }
         }
 
-        // Exposure compensation.
-        if (lens != null && lens.evStep > 0f && lens.evMax > lens.evMin) {
+        if (manualOpen && lens != null) ManualControls(vm.controller, st, lens)
+
+        // Exposure compensation (not used by burst modes, which set their own exposure).
+        if (lens != null && lens.evStep > 0f && lens.evMax > lens.evMin && mode.burst == null) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -141,7 +163,7 @@ fun CameraScreen(vm: CameraViewModel, deviceOrientation: () -> Int, onOpenSettin
         if (st.focusPoint != null) {
             Text(
                 "Focus and exposure set by tap. Long-press the preview or tap here for auto.",
-                color = Color(0xFFFFD54F),
+                color = Accent,
                 fontSize = 12.sp,
                 modifier = Modifier.padding(horizontal = 16.dp).clickable { vm.controller.resetFocus() },
             )
@@ -152,10 +174,7 @@ fun CameraScreen(vm: CameraViewModel, deviceOrientation: () -> Int, onOpenSettin
         // Lens choice for the current side (e.g. 0.6x and 1x on the back).
         val sameSide = st.lenses.filter { it.front == lens?.front }
         if (sameSide.size > 1) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
-            ) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
                 sameSide.forEach { l ->
                     val selected = l.id == lens?.id
                     Text(
@@ -165,13 +184,34 @@ fun CameraScreen(vm: CameraViewModel, deviceOrientation: () -> Int, onOpenSettin
                         modifier = Modifier
                             .padding(horizontal = 6.dp)
                             .clip(CircleShape)
-                            .background(if (selected) Color(0xFFFFD54F) else Color(0x33FFFFFF))
-                            .clickable(enabled = !st.capturing) { vm.selectLens(l.id) }
+                            .background(if (selected) Accent else Chip)
+                            .clickable(enabled = !photo.busy) { vm.selectLens(l.id) }
                             .padding(horizontal = 14.dp, vertical = 8.dp),
                     )
                 }
             }
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(10.dp))
+        }
+
+        // Capture mode.
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+            CaptureMode.entries.forEach { m ->
+                val available = m.burst == null || lens?.yuvSize != null
+                val selected = m == mode
+                Text(
+                    m.label.uppercase(Locale.US),
+                    color = when {
+                        selected -> Accent
+                        available -> Color.White
+                        else -> Color.Gray
+                    },
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                    fontSize = 14.sp,
+                    modifier = Modifier
+                        .clickable(enabled = available && !photo.busy) { vm.setMode(m) }
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                )
+            }
         }
 
         photo.message?.let {
@@ -180,7 +220,7 @@ fun CameraScreen(vm: CameraViewModel, deviceOrientation: () -> Int, onOpenSettin
 
         // Thumbnail, shutter, switch camera.
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 20.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 16.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -188,7 +228,7 @@ fun CameraScreen(vm: CameraViewModel, deviceOrientation: () -> Int, onOpenSettin
                 Modifier
                     .size(56.dp)
                     .clip(RoundedCornerShape(10.dp))
-                    .background(Color(0x33FFFFFF))
+                    .background(Chip)
                     .clickable(enabled = photo.lastUri != null) {
                         val uri = photo.lastUri ?: return@clickable
                         try {
@@ -206,15 +246,15 @@ fun CameraScreen(vm: CameraViewModel, deviceOrientation: () -> Int, onOpenSettin
                 }
             }
 
-            val canShoot = st.open && !st.capturing && !photo.saving
+            val canShoot = st.open && !st.capturing && !photo.busy
             Box(
                 Modifier
                     .size(78.dp)
-                    .border(4.dp, Color.White, CircleShape)
+                    .border(4.dp, if (mode.burst != null) Accent else Color.White, CircleShape)
                     .padding(8.dp)
                     .clip(CircleShape)
                     .background(if (canShoot) Color.White else Color.Gray)
-                    .clickable(enabled = canShoot) { vm.shoot(deviceOrientation()) },
+                    .clickable(enabled = canShoot) { vm.shutter(deviceOrientation) },
             )
 
             val hasOtherSide = st.lenses.any { it.front != lens?.front }
@@ -222,13 +262,52 @@ fun CameraScreen(vm: CameraViewModel, deviceOrientation: () -> Int, onOpenSettin
                 Modifier
                     .size(56.dp)
                     .clip(CircleShape)
-                    .background(Color(0x33FFFFFF))
+                    .background(Chip)
                     .alpha(if (hasOtherSide) 1f else 0.3f)
-                    .clickable(enabled = hasOtherSide && !st.capturing) { vm.switchFacing() },
+                    .clickable(enabled = hasOtherSide && !photo.busy) { vm.switchFacing() },
                 contentAlignment = Alignment.Center,
             ) {
                 Text("⇄", color = Color.White, fontSize = 24.sp)
             }
+        }
+    }
+}
+
+/** Manual focus distance and white balance presets, shown under the preview when "Manual" is on. */
+@Composable
+private fun ManualControls(controller: CameraController, st: CameraController.State, lens: LensInfo) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+        if (lens.manualFocusAvailable) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                ChipText("AF", st.manualFocus == null) { controller.setManualFocus(null) }
+                val focus = st.manualFocus
+                Text(
+                    if (focus == null) "  Focus: auto" else if (focus <= 0.01f) "  ∞" else String.format(Locale.US, "  %.2f m", 1f / focus),
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(end = 6.dp),
+                )
+                // Left = far (0 diopters), right = closest focus.
+                Slider(
+                    value = focus ?: 0f,
+                    onValueChange = { controller.setManualFocus(it) },
+                    valueRange = 0f..lens.minFocusDistance,
+                    colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White),
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        } else {
+            Text("This lens has fixed focus.", color = Color.Gray, fontSize = 12.sp)
+        }
+        val presets = listOf(
+            CameraMetadata.CONTROL_AWB_MODE_AUTO to "Auto WB",
+            CameraMetadata.CONTROL_AWB_MODE_DAYLIGHT to "Daylight",
+            CameraMetadata.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT to "Cloudy",
+            CameraMetadata.CONTROL_AWB_MODE_INCANDESCENT to "Tungsten",
+            CameraMetadata.CONTROL_AWB_MODE_FLUORESCENT to "Fluorescent",
+        ).filter { it.first in lens.awbModes }
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            presets.forEach { (m, label) -> ChipText(label, st.awbMode == m) { controller.setAwbMode(m) } }
         }
     }
 }
@@ -254,6 +333,18 @@ private fun PreviewSurface(controller: CameraController, previewSize: Size) {
         update = { view -> view.holder.setFixedSize(previewSize.width, previewSize.height) },
         modifier = Modifier.fillMaxSize(),
     )
+}
+
+/** Rule-of-thirds grid. */
+@Composable
+private fun Grid() {
+    Canvas(Modifier.fillMaxSize()) {
+        val c = Color(0x66FFFFFF)
+        for (i in 1..2) {
+            drawLine(c, Offset(size.width * i / 3, 0f), Offset(size.width * i / 3, size.height), strokeWidth = 1.dp.toPx())
+            drawLine(c, Offset(0f, size.height * i / 3), Offset(size.width, size.height * i / 3), strokeWidth = 1.dp.toPx())
+        }
+    }
 }
 
 @Composable
@@ -289,19 +380,19 @@ private fun ShutterFlash(shots: Int) {
 }
 
 @Composable
-private fun LockChip(label: String, locked: Boolean, available: Boolean, onClick: () -> Unit) {
+private fun ChipText(label: String, active: Boolean, enabled: Boolean = true, onClick: () -> Unit) {
     Text(
         label,
         color = when {
-            !available -> Color.Gray
-            locked -> Color.Black
+            !enabled -> Color.Gray
+            active -> Color.Black
             else -> Color.White
         },
         fontSize = 13.sp,
         modifier = Modifier
             .clip(RoundedCornerShape(16.dp))
-            .background(if (locked) Color(0xFFFFD54F) else Color(0x33FFFFFF))
-            .clickable(enabled = available, onClick = onClick)
+            .background(if (active) Accent else Chip)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 6.dp),
     )
 }

@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
+import android.view.KeyEvent
 import android.view.OrientationEventListener
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -32,7 +33,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -48,6 +48,7 @@ class MainActivity : ComponentActivity() {
     private val permissionGranted = mutableStateOf(false)
     private val askedForPermission = mutableStateOf(false)
     private val deviceOrientation = mutableIntStateOf(0)
+    private val currentScreen = mutableStateOf(Screen.CAMERA)
 
     private val orientationListener by lazy {
         object : OrientationEventListener(this) {
@@ -83,6 +84,29 @@ class MainActivity : ComponentActivity() {
         reportVm.cancelRun("The report stopped because the app left the screen (the camera is always released on pause). Keep the app open and run it again.")
     }
 
+    /** Volume keys, the camera key and most Bluetooth camera remotes (which send volume up or Enter). */
+    private fun isShutterKey(keyCode: Int) = keyCode in setOf(
+        KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.KEYCODE_CAMERA,
+        KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_HEADSETHOOK,
+    )
+
+    private fun shutterKeysActive() =
+        currentScreen.value == Screen.CAMERA && permissionGranted.value && cameraVm.settings.values.value.volumeShutter
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (isShutterKey(keyCode) && shutterKeysActive()) {
+            if (event.repeatCount == 0) {
+                AppLog.i("Shutter key ${KeyEvent.keyCodeToString(keyCode)}")
+                cameraVm.shutter { deviceOrientation.intValue }
+            }
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean =
+        if (isShutterKey(keyCode) && shutterKeysActive()) true else super.onKeyUp(keyCode, event)
+
     private fun hasCameraPermission() =
         ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
 
@@ -93,7 +117,7 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun App() {
-        var screen by rememberSaveable { mutableStateOf(Screen.CAMERA) }
+        var screen by currentScreen
         val granted by permissionGranted
         val reportState by reportVm.state.collectAsState()
         val cameraState by cameraVm.controller.state.collectAsState()
