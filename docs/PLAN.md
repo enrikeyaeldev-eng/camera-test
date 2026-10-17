@@ -162,7 +162,21 @@ Output: a `report.json`, a readable `report.txt` summary and a folder of test im
 
 **Done when:** the APK installs from the `latest` release, the report runs without crashing, and the owner has shared the report. **Stop here and wait.**
 
-Status (Oct 17, 2026): all Phase 0 code is written and CI builds it. Still open: signing secrets, merging to `main` so `latest` is published, and the owner running the report on the phone. The live tests are untested on the device until then.
+Status (Oct 17, 2026): **Done when met.** Build 5 installed from `latest`, the report ran in 129 s without crashing or logged errors, and the owner shared `report.json`, `report.txt` and the images.
+
+#### Phase 0 results (run 20261016-195634, back camera ID 0)
+
+| Question | Answer | Consequence |
+| --- | --- | --- |
+| Camera IDs | `0` back main, `1` front, **`2` back ultrawide** (1.74 mm, fixed focus, 4000 × 3000), `3` front (3472 × 2388). No hidden IDs among the 33 others tried. | The ultrawide is reachable after all; all four are LIMITED. |
+| Burst speed at 4080 × 3060 YUV | ~29.8 fps with `captureBurst` or repeating PREVIEW (33.6 ms per frame); ~26–28 fps with the STILL_CAPTURE template. 0 capture failures. | Fast enough: **stacking is the main project** (decision rule). Use the PREVIEW template for burst frames. |
+| Camera Extensions | Only FACE_RETOUCH and BOKEH. Both capture fine (~400 ms). **No NIGHT or HDR.** | **Skip Phase 2.** |
+| Manual exposure | AE OFF is honoured where frames arrived: 66.7 ms and 100 ms at ISO 200, ISO 100 and 200 at 1/60 s, exact values in the results, brightness follows. Range 34.7 µs to **100 ms max**, ISO 50 to 2500. | Night mode can use manual exposure, but no single frame is longer than 1/10 s, so low light must come from more frames. |
+| RAW, JPEG_R (Ultra HDR), HEIC | Not supported on any camera. | Output stays 16-bit TIFF, linear DNG and JPEG. |
+| NR and edge modes | OFF, FAST and HIGH_QUALITY listed for both. | Whether they are honoured is **not yet measured**: see the bug below. |
+| High-speed video | Back main: 1280 × 720 up to 240 fps. Ultrawide: none. | Relevant to the video idea below. |
+
+**Diagnostics bug still to fix:** at 30 fps the app stopped pairing frames with their results. That left gaps in the 1/1000 to 1/60 s exposure points, ISO 400 and above, all of EV bracketing, all NR/edge crops and the full-size reference frame. Every capture at 15 fps or slower worked. The likely cause is that frame handling falls behind the 12-entry pairing buffer in `LiveSession`. Fix it, ideally after reading the owner's app log, and re-run the report before Phase 3's tuning depends on NR/edge and EV numbers.
 
 ### Phase 1: Basic camera
 
@@ -173,7 +187,7 @@ Status (Oct 17, 2026): all Phase 0 code is written and CI builds it. Still open:
 
 **Done when:** the app takes reliable single photos and survives pause, resume and rotation.
 
-### Phase 2: Samsung Extensions (only if Phase 0 found them)
+### Phase 2: Samsung Extensions (only if Phase 0 found them) — skipped: no NIGHT or HDR extension
 
 - [ ] Night and HDR modes through `CameraExtensionSession`, with a progress indicator while Samsung processes.
 
@@ -205,6 +219,13 @@ Status (Oct 17, 2026): all Phase 0 code is written and CI builds it. Still open:
 - [ ] Background processing so the camera is ready for the next shot.
 - [ ] GPU acceleration of the merge if speed or heat is a problem.
 
+## Ideas for later (not scheduled)
+
+Raised by the owner on Oct 17, 2026. Consider them when planning each phase; neither changes Phases 1 to 3.
+
+- **Video recording.** The roadmap is stills-only so far. Phase 0 shows 1280 × 720 high-speed video up to 240 fps on the back main camera, no video stabilisation mode (OIS only), and full-size YUV at 30 fps. A basic video mode (MediaRecorder or MediaCodec on a Camera2 session, with the same AE/AWB locks) fits naturally after Phase 1. Stacked or denoised video is a much larger project.
+- **Bluetooth remote shutter.** Most cheap Bluetooth camera remotes act as a keyboard or media button and send volume-up or Enter. They would then work through the same key handling as the Phase 5 volume-key shutter, with no pairing code in the app. Plan: in Phase 5, handle `KEYCODE_VOLUME_UP/DOWN`, `KEYCODE_CAMERA`, `KEYCODE_ENTER` and media keys as the shutter, then test with the owner's remote. Only if a remote needs its own protocol: BLE (Bluetooth permissions, pairing UI), as a separate task.
+
 ## Risks, effort and skills
 
 The biggest risk is that the finished app does not clearly beat Samsung's own camera, which processes the sensor's RAW data internally. Realistic wins are less noise in dim scenes, a less oversharpened look, and files with more headroom for Lightroom.
@@ -213,9 +234,9 @@ The biggest risk is that the finished app does not clearly beat Samsung's own ca
 | --- | --- | --- |
 | Stacked YUV not clearly better than the stock app in daylight | High | Judge success on low light and natural look, not daylight |
 | Full-size burst too slow for stacking | Medium | Stack fewer frames or at a lower size; rely on Extensions |
-| No Camera Extensions on the A56 | Medium | Phase 2 is skipped; no other work depends on it |
+| No Camera Extensions on the A56 | Confirmed: only FACE_RETOUCH and BOKEH | Phase 2 is skipped; no other work depends on it |
 | Manual exposure ignored (LIMITED device) | Medium | Bracket with exposure compensation instead |
-| Ultrawide and macro unreachable | High | Back main and front cameras only |
+| Ultrawide and macro unreachable | Resolved for the ultrawide (ID 2, Phase 0); no macro found | Ultrawide can be offered as a second back camera |
 | Memory pressure or heat during merges | Medium | Native buffers, fewer frames, GPU path in Phase 5 |
 | One UI update changes camera behaviour | Low to medium | Re-run the diagnostic report after each major update |
 | Ghosting on moving subjects | High at first | Robust merge with tile rejection; fewer frames for moving scenes |
