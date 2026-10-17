@@ -211,6 +211,153 @@ int main() {
         check(darkOut < darkRef / 2, "HDR lifts most crushed shadows", static_cast<double>(darkOut) / std::max(1L, darkRef));
     }
 
+    // --- Glitches seen on the phone: blocks on smooth gradients and HDR ghosts.
+    {
+        // Smooth radial glow (like a lamp on a wall) with only a little texture at the edges, plus noise.
+        auto glow = [&](int xx, int yy) {
+            const float dx = (xx - SW * 0.5f) / SW, dy = (yy - SH * 0.4f) / SH;
+            return 40.f + 180.f * std::exp(-(dx * dx + dy * dy) * 12.f);
+        };
+        const int gx[4] = {0, 9, -14, 5}, gy[4] = {0, -6, 11, -3};
+        Stack g(W, H, 4);
+        std::normal_distribution<float> n4(0.f, 4.f);
+        for (int i = 0; i < 4; ++i) {
+            for (int yy = 0; yy < H; ++yy)
+                for (int xx = 0; xx < W; ++xx) {
+                    float val = glow(xx + PAD + gx[i], yy + PAD + gy[i]);
+                    if (xx < 64 || yy < 64) val = blurred[(yy + PAD + gy[i]) * SW + xx + PAD + gx[i]];  // textured border
+                    y[yy * W + xx] = static_cast<uint8_t>(std::clamp(val + n4(rng), 0.f, 255.f));
+                }
+            for (int k = 0; k < W / 2 * H / 2; ++k) { u[k] = 128; v[k] = 128; }
+            g.addFrame(y.data(), W, 1, u.data(), v.data(), W / 2, 1, i);
+        }
+        const a56::StackStats gs = g.process();
+        a56::RenderParams plain;
+        plain.gain = 1.f;
+        plain.sharpen = 0.f;
+        // Blockiness: compare the merged glow with the true glow seen from the reference; a wrongly shifted
+        // tile on a gradient shows up as a local brightness error.
+        // Average the signed error over 16×16 blocks: noise averages out, a block-wide bias does not.
+        const int B = 16, bw = W / B, bh = H / B;
+        std::vector<double> blockErr(static_cast<size_t>(bw) * bh, 0.0);
+        g.render(plain, [&](int row, const float* rgb) {
+            for (int x = 0; x < bw * B; ++x) {
+                blockErr[(row / B) * bw + x / B] +=
+                    rgb[3 * x + 1] * 255.0 - glow(x + PAD + gx[gs.reference], row + PAD + gy[gs.reference]);
+            }
+        });
+        double worst = 0;
+        for (int by = 6; by < bh - 2; ++by)
+            for (int bx = 6; bx < bw - 2; ++bx) worst = std::max(worst, std::fabs(blockErr[by * bw + bx] / (B * B)));
+        check(worst < 1.5, "no tile blocks on a smooth gradient (worst 16x16 block bias)", worst);
+    }
+    {
+        // HDR of a lamp glow on a wall: clipped near the lamp in the brighter brackets, smooth everywhere.
+        auto encode = [](float lin) {
+            lin = std::clamp(lin, 0.f, 1.f);
+            return lin <= 0.0031308f ? lin * 12.92f : 1.055f * std::pow(lin, 1 / 2.4f) - 0.055f;
+        };
+        auto radiance = [&](int xx, int yy) {
+            const float dx = (xx - SW * 0.5f) / SW, dy = (yy - SH * 0.4f) / SH;
+            return 0.03f + 2.5f * std::exp(-(dx * dx + dy * dy) * 10.f);
+        };
+        const float exposures[3] = {0.25f, 1.f, 4.f};
+        const int hx[3] = {-6, 0, 8}, hy[3] = {4, 0, -5};
+        Stack hdr(W, H, 3);
+        std::vector<uint8_t> fy(W * H);
+        std::normal_distribution<float> n3(0.f, 3.f);
+        for (int i = 0; i < 3; ++i) {
+            for (int yy = 0; yy < H; ++yy)
+                for (int xx = 0; xx < W; ++xx) {
+                    float val = 255.f * encode(radiance(xx + PAD + hx[i], yy + PAD + hy[i]) * exposures[i]);
+                    if (xx < 64) val = blurred[(yy + PAD + hy[i]) * SW + xx + PAD + hx[i]];  // some detail to align on
+                    fy[yy * W + xx] = static_cast<uint8_t>(std::clamp(val + n3(rng), 0.f, 255.f));
+                }
+            for (int k = 0; k < W / 2 * H / 2; ++k) { u[k] = 128; v[k] = 128; }
+            hdr.addFrame(fy.data(), W, 1, u.data(), v.data(), W / 2, 1, i, exposures[i]);
+        }
+        a56::ProcessParams hp;
+        hp.hdr = true;
+        hdr.process(hp);
+        a56::RenderParams plain;
+        plain.gain = 1.f;
+        plain.sharpen = 0.f;
+        const int B = 16, bw = W / B, bh = H / B;
+        std::vector<double> m(static_cast<size_t>(bw) * bh, 0.0);
+        hdr.render(plain, [&](int row, const float* rgb) {
+            if (row >= bh * B) return;
+            for (int x = 0; x < bw * B; ++x) m[(row / B) * bw + x / B] += rgb[3 * x + 1] * 255.0 / (B * B);
+        });
+        double worst = 0;
+        for (int by = 2; by < bh - 2; ++by)
+            for (int bx = 6; bx < bw - 2; ++bx) {
+                const double lap = std::fabs(4 * m[by * bw + bx] - m[by * bw + bx - 1] - m[by * bw + bx + 1] -
+                                             m[(by - 1) * bw + bx] - m[(by + 1) * bw + bx]) / 4;
+                worst = std::max(worst, lap);
+            }
+        check(worst < 2.0, "HDR: no blocks on a lamp glow (worst block step)", worst);
+    }
+    {
+        // HDR with something that moved: a bright object only in the +2 EV frame.
+        auto encode = [](float lin) {
+            lin = std::clamp(lin, 0.f, 1.f);
+            return lin <= 0.0031308f ? lin * 12.92f : 1.055f * std::pow(lin, 1 / 2.4f) - 0.055f;
+        };
+        std::vector<float> radiance(static_cast<size_t>(SW) * SH);
+        for (int yy = 0; yy < SH; ++yy)
+            for (int xx = 0; xx < SW; ++xx) radiance[yy * SW + xx] = 0.02f + 0.25f * blurred[yy * SW + xx] / 255.f;
+        const float exposures[3] = {0.25f, 1.f, 4.f};
+        const int ox = 300, oy = 200, os = 120;
+        // Fuse the same brackets with and without a bright object (e.g. a screen) that is only in the -2 EV
+        // bracket, where it is perfectly exposed. Without deghosting it would show up in the result.
+        auto fuse = [&](bool withObject) {
+            Stack hdr(W, H, 3);
+            std::vector<uint8_t> fy(W * H);
+            for (int i = 0; i < 3; ++i) {
+                for (int yy = 0; yy < H; ++yy)
+                    for (int xx = 0; xx < W; ++xx) {
+                        float lin = radiance[(yy + PAD) * SW + xx + PAD] * exposures[i];
+                        if (withObject && i == 0 && xx >= ox && xx < ox + os && yy >= oy && yy < oy + os) lin = 2.0f * exposures[i];
+                        fy[yy * W + xx] = static_cast<uint8_t>(std::clamp(255.f * encode(lin), 0.f, 255.f));
+                    }
+                for (int k = 0; k < W / 2 * H / 2; ++k) { u[k] = 128; v[k] = 128; }
+                hdr.addFrame(fy.data(), W, 1, u.data(), v.data(), W / 2, 1, i, exposures[i]);
+            }
+            a56::ProcessParams hp;
+            hp.hdr = true;
+            hdr.process(hp);
+            a56::RenderParams plain;
+            plain.gain = 1.f;
+            plain.sharpen = 0.f;
+            std::vector<float> g(static_cast<size_t>(W) * H);
+            hdr.render(plain, [&](int row, const float* rgb) {
+                for (int x = 0; x < W; ++x) g[row * W + x] = rgb[3 * x + 1] * 255.f;
+            });
+            return g;
+        };
+        const std::vector<float> with = fuse(true), without = fuse(false);
+        double inside = 0;
+        long ni = 0;
+        for (int yy = oy; yy < oy + os; ++yy)
+            for (int xx = ox; xx < ox + os; ++xx) {
+                inside += std::fabs(with[yy * W + xx] - without[yy * W + xx]);
+                ++ni;
+            }
+        const double ghost = inside / ni;  // mean brightness the moving object adds to the result
+        double signedSum = 0, maxBlock = 0;
+        for (int yy = oy; yy < oy + os; ++yy)
+            for (int xx = ox; xx < ox + os; ++xx) signedSum += with[yy * W + xx] - without[yy * W + xx];
+        for (int by = oy; by + 16 <= oy + os; by += 16)
+            for (int bx = ox; bx + 16 <= ox + os; bx += 16) {
+                double b = 0;
+                for (int yy = by; yy < by + 16; ++yy)
+                    for (int xx = bx; xx < bx + 16; ++xx) b += with[yy * W + xx] - without[yy * W + xx];
+                maxBlock = std::max(maxBlock, b / 256);
+            }
+        std::printf("HDR ghost: mean |diff| %.2f, signed %.2f, brightest 16px block %+.2f\n", ghost, signedSum / ni, maxBlock);
+        check(ghost < 8.0, "HDR leaves out an object that moved in one bracket (ghost level)", ghost);
+    }
+
     std::printf("%s\n", failures == 0 ? "ALL PASSED" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

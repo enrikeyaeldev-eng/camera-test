@@ -423,6 +423,33 @@ StackStats Stack::process(const ProcessParams& params) {
     al.W = width_;
     al.H = height_;
     al.shifts.resize(n);
+    // Detail per 16×16 alignment tile of the reference. Tiles without detail (flat walls, smooth glows)
+    // cannot be aligned reliably: any shift matches noise equally well, and on a brightness gradient a
+    // wrong shift shows as a square patch. Those tiles take the frame's overall shift instead.
+    const int T = kAlignTile, W = width_, H = height_;
+    const int gtx = (W + T - 1) / T, gty = (H + T - 1) / T;
+    std::vector<float> texture(static_cast<size_t>(gtx) * gty);
+    std::vector<char> textured(texture.size(), 1);
+    {
+        const uint8_t* ry = frames_[ref].y.data();
+        parallelFor(gty, [&](int ty) {
+            const int y0 = std::min(ty * T, H - T);
+            for (int tx = 0; tx < gtx; ++tx) {
+                const int x0 = std::min(tx * T, W - T);
+                long sum = 0;
+                for (int y = y0; y < y0 + T - 1; ++y) {
+                    const uint8_t* row = ry + static_cast<size_t>(y) * W;
+                    for (int x = x0; x < x0 + T - 1; ++x) sum += std::abs(row[x + 1] - row[x]) + std::abs(row[x + W] - row[x]);
+                }
+                texture[static_cast<size_t>(ty) * gtx + tx] = static_cast<float>(sum) / ((T - 1) * (T - 1));
+            }
+        });
+        std::vector<float> sorted = texture;
+        std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 5, sorted.end());
+        const float flat = 1.5f * sorted[sorted.size() / 5];  // noise-only tiles sit near the 20th percentile
+        for (size_t t = 0; t < texture.size(); ++t) textured[t] = texture[t] > flat;
+    }
+
     {
         const std::vector<Level> refPyr = pyramid(frames_[ref]);
         std::vector<int> tilesX(n, 0), tilesY(n, 0);
@@ -431,48 +458,57 @@ StackStats Stack::process(const ProcessParams& params) {
             int& atx = tilesX[i];
             int& aty = tilesY[i];
             const double ratio = frames_[ref].exposure / frames_[i].exposure;
-            if (std::fabs(ratio - 1.0) < 0.05) {
-                al.shifts[i] = align(refPyr, pyramid(frames_[i]), &atx, &aty);
-            } else {
+            const bool sameExposure = std::fabs(ratio - 1.0) < 0.05;
+            Frame matched;  // brightness-matched copy for frames with another exposure
+            if (!sameExposure) {
                 uint8_t lut[256];
                 for (int v = 0; v < 256; ++v) {
                     const float lin = srgbDecode(v / 255.f) * static_cast<float>(ratio);
                     lut[v] = static_cast<uint8_t>(std::lround(255.f * srgbEncode(std::min(1.f, lin))));
                 }
-                Frame matched;
                 matched.y.resize(frames_[i].y.size());
                 for (size_t p = 0; p < matched.y.size(); ++p) matched.y[p] = lut[frames_[i].y[p]];
-                al.shifts[i] = align(refPyr, pyramid(matched), &atx, &aty);
-                // Tiles clipped or crushed in either frame have no usable detail: give them the median shift
-                // of the well-exposed tiles instead of a guess.
-                std::vector<char> valid(al.shifts[i].size(), 0);
-                std::vector<int> xs, ys;
-                const int T = kAlignTile, W = width_, H = height_;
-                for (int ty = 0; ty < aty; ++ty) {
-                    const int y0 = std::min(ty * T, H - T);
-                    for (int tx = 0; tx < atx; ++tx) {
-                        const int x0 = std::min(tx * T, W - T);
+            }
+            const std::vector<uint8_t>& altY = sameExposure ? frames_[i].y : matched.y;
+            al.shifts[i] = align(refPyr, pyramid(sameExposure ? frames_[i] : matched), &atx, &aty);
+
+            // Reliable tiles: detailed, and (for brackets) neither clipped nor crushed in either frame.
+            std::vector<char> reliable(al.shifts[i].size(), 0);
+            std::vector<int> xs, ys;
+            for (int ty = 0; ty < aty; ++ty) {
+                const int y0 = std::min(ty * T, H - T);
+                for (int tx = 0; tx < atx; ++tx) {
+                    const int x0 = std::min(tx * T, W - T);
+                    const size_t t = static_cast<size_t>(ty) * atx + tx;
+                    bool ok = textured[t] != 0;
+                    if (ok && !sameExposure) {
                         long sr = 0, sa = 0;
                         for (int y = y0; y < y0 + T; ++y) {
                             for (int x = x0; x < x0 + T; ++x) {
                                 sr += frames_[ref].y[static_cast<size_t>(y) * W + x];
-                                sa += matched.y[static_cast<size_t>(y) * W + x];
+                                sa += altY[static_cast<size_t>(y) * W + x];
                             }
                         }
                         const long mr = sr / (T * T), ma = sa / (T * T);
-                        const size_t t = static_cast<size_t>(ty) * atx + tx;
-                        if (mr >= 16 && mr <= 239 && ma >= 16 && ma <= 239) {
-                            valid[t] = 1;
-                            xs.push_back(al.shifts[i][t].dx);
-                            ys.push_back(al.shifts[i][t].dy);
-                        }
+                        ok = mr >= 16 && mr <= 239 && ma >= 16 && ma <= 239;
+                    }
+                    if (ok) {
+                        reliable[t] = 1;
+                        xs.push_back(al.shifts[i][t].dx);
+                        ys.push_back(al.shifts[i][t].dy);
                     }
                 }
-                if (!xs.empty()) {
-                    std::nth_element(xs.begin(), xs.begin() + xs.size() / 2, xs.end());
-                    std::nth_element(ys.begin(), ys.begin() + ys.size() / 2, ys.end());
-                    const Shift global{xs[xs.size() / 2], ys[ys.size() / 2]};
-                    for (size_t t = 0; t < valid.size(); ++t) if (!valid[t]) al.shifts[i][t] = global;
+            }
+            if (!xs.empty()) {
+                std::nth_element(xs.begin(), xs.begin() + xs.size() / 2, xs.end());
+                std::nth_element(ys.begin(), ys.begin() + ys.size() / 2, ys.end());
+                const Shift global{xs[xs.size() / 2], ys[ys.size() / 2]};
+                // Brackets are taken a fraction of a second apart, so hand-shake between them is close to a
+                // pure translation: use one shift for the whole frame, which also avoids tile seams where
+                // the brightness-matched frames differ in tone. Same-exposure stacks keep per-tile shifts
+                // where there is detail (local motion, lens distortion) and the overall shift elsewhere.
+                for (size_t t = 0; t < reliable.size(); ++t) {
+                    if (params.hdr || !reliable[t]) al.shifts[i][t] = global;
                 }
             }
         });
@@ -608,6 +644,8 @@ void Stack::fuseExposures(const Alignment& al, StackStats& st) {
     st.tileWeight.assign(static_cast<size_t>(mtx) * mty, 1.f);
     auto one = [](int, int) { return 1.f; };
 
+    std::vector<double> exposure(n);
+    for (int i = 0; i < n; ++i) exposure[i] = frames_[i].exposure;
     std::vector<Img> ys(n), vs(n), us(n), ws(n);
     parallelFor(n, [&](int i) {
         auto shiftOf = [&al, i](int tx, int ty) { return al.at(i, tx * kMergeStep, ty * kMergeStep); };
@@ -621,7 +659,104 @@ void Stack::fuseExposures(const Alignment& al, StackStats& st) {
             v.p[p] /= w;
             u.p[p] /= w;
         }
-        // Raw weights.
+        ys[i] = std::move(y);
+        vs[i] = std::move(v);
+        us[i] = std::move(u);
+    });
+    std::vector<Frame>().swap(frames_);  // the warped float copies are all that is needed now
+
+    // Ghosts: where a bracket, brightness-matched to the reference, disagrees with it (something moved or
+    // a screen changed), that bracket's content is replaced by the reference's. Judged per 32×32 tile on
+    // pixels well exposed in both, relative to the typical disagreement (tone-curve differences), then
+    // interpolated smoothly between tile centres.
+    const int ref = al.ref;
+    parallelFor(n, [&](int i) {
+        if (i == ref) return;
+        float lut[256];
+        const float ratio = static_cast<float>(exposure[ref] / exposure[i]);
+        for (int v = 0; v < 256; ++v) lut[v] = 255.f * srgbEncode(std::min(1.f, srgbDecode(v / 255.f) * ratio));
+        std::vector<float> d(static_cast<size_t>(mtx) * mty, -1.f);
+        for (int ty = 0; ty < mty; ++ty) {
+            for (int tx = 0; tx < mtx; ++tx) {
+                double sum = 0;
+                int cnt = 0, total = 0;
+                for (int y = std::max(ty * S - S, 0); y < std::min(ty * S + S, H); ++y) {
+                    for (int x = std::max(tx * S - S, 0); x < std::min(tx * S + S, W); ++x) {
+                        ++total;
+                        const float r = ys[ref].at(x, y), a = ys[i].at(x, y);
+                        const float m = lut[static_cast<int>(std::min(255.f, std::max(0.f, a)) + 0.5f)];
+                        // Both must be well exposed. The brightness-matched value may leave the range: a bracket
+                        // predicting "brighter than white" where the reference is not clipped is a disagreement.
+                        if (r < 12.f || r > 243.f || a < 12.f || a > 243.f) continue;
+                        sum += std::fabs(m - r);
+                        ++cnt;
+                    }
+                }
+                if (cnt * 4 >= total) d[static_cast<size_t>(ty) * mtx + tx] = static_cast<float>(sum / cnt);
+            }
+        }
+        std::vector<float> known;
+        for (float v : d) if (v >= 0) known.push_back(v);
+        if (known.size() < 8) return;  // too little overlap to judge
+        std::nth_element(known.begin(), known.begin() + known.size() / 2, known.end());
+        const float typical = known[known.size() / 2];
+        const float lo = std::max(4.f, 2.f * typical), hi = std::max(8.f, 4.f * typical);
+        std::vector<float> keep(d.size(), 1.f);
+        int ghosts = 0;
+        for (size_t t = 0; t < d.size(); ++t) {
+            if (d[t] < 0) continue;  // cannot compare (clipped in one frame): that is what HDR needs this frame for
+            keep[t] = d[t] <= lo ? 1.f : (d[t] >= hi ? 0.f : (hi - d[t]) / (hi - lo));
+            ghosts += keep[t] < 0.5f;
+        }
+        if (ghosts == 0) return;
+        // Grow ghost areas by one tile: objects rarely end on a tile border.
+        std::vector<float> grown(keep.size());
+        for (int ty = 0; ty < mty; ++ty) {
+            for (int tx = 0; tx < mtx; ++tx) {
+                float k = 1.f;
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx)
+                        k = std::min(k, keep[static_cast<size_t>(clampi(ty + dy, 0, mty - 1)) * mtx + clampi(tx + dx, 0, mtx - 1)]);
+                grown[static_cast<size_t>(ty) * mtx + tx] = k;
+            }
+        }
+        keep.swap(grown);
+        // Exposure fusion blurs weights over large areas at coarse pyramid levels, so lowering the weight
+        // alone lets a ghost bleed in as haze. Instead the ghosted content is replaced by the reference,
+        // brightness-matched to this bracket, so nothing inconsistent is left to blend.
+        float toAlt[256];
+        for (int v = 0; v < 256; ++v) toAlt[v] = 255.f * srgbEncode(std::min(1.f, srgbDecode(v / 255.f) / ratio));
+        auto keepAt = [&](float fx, float fy) {
+            const int x0 = std::min(static_cast<int>(fx), mtx - 1), x1 = std::min(x0 + 1, mtx - 1);
+            const int y0 = std::min(static_cast<int>(fy), mty - 1), y1 = std::min(y0 + 1, mty - 1);
+            const float wx = fx - x0, wy = fy - y0;
+            return (keep[y0 * mtx + x0] * (1 - wx) + keep[y0 * mtx + x1] * wx) * (1 - wy) +
+                   (keep[y1 * mtx + x0] * (1 - wx) + keep[y1 * mtx + x1] * wx) * wy;
+        };
+        for (int y = 0; y < H; ++y) {
+            for (int x = 0; x < W; ++x) {
+                const float k = keepAt(static_cast<float>(x) / S, static_cast<float>(y) / S);
+                if (k >= 0.999f) continue;
+                const float r = ys[ref].at(x, y);
+                const float substitute = toAlt[static_cast<int>(std::min(255.f, std::max(0.f, r)) + 0.5f)];
+                ys[i].at(x, y) = k * ys[i].at(x, y) + (1 - k) * substitute;
+            }
+        }
+        for (int y = 0; y < CH; ++y) {
+            for (int x = 0; x < CW; ++x) {
+                const float k = keepAt(2.f * x / S, 2.f * y / S);
+                if (k >= 0.999f) continue;
+                vs[i].at(x, y) = k * vs[i].at(x, y) + (1 - k) * vs[ref].at(x, y);
+                us[i].at(x, y) = k * us[i].at(x, y) + (1 - k) * us[ref].at(x, y);
+            }
+        }
+    });
+
+    // Fusion weights, from the (deghosted) content: favour well-exposed, detailed, colourful pixels.
+    parallelFor(n, [&](int i) {
+        const Img& y = ys[i];
+        const Img& v = vs[i];
+        const Img& u = us[i];
         Img w(W, H);
         for (int yy = 0; yy < H; ++yy) {
             for (int xx = 0; xx < W; ++xx) {
@@ -634,12 +769,8 @@ void Stack::fuseExposures(const Alignment& al, StackStats& st) {
                 w.at(xx, yy) = (lap + 0.05f) * wellExposed * (0.5f + sat) + 1e-6f;
             }
         }
-        ys[i] = std::move(y);
-        vs[i] = std::move(v);
-        us[i] = std::move(u);
         ws[i] = std::move(w);
     });
-    std::vector<Frame>().swap(frames_);  // the warped float copies are all that is needed now
 
     // Normalise weights per pixel.
     for (size_t p = 0; p < ws[0].p.size(); ++p) {

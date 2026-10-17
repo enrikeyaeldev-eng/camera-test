@@ -242,6 +242,8 @@ Status (Oct 17, 2026): built, waiting for the owner's phone test.
 
 - **Green photos with "High quality" noise reduction or sharpening (Photo mode).** One owner photo had green 19× blue and was 2.5 stops darker than a normal shot, with auto WB in EXIF. Samsung's HQ still path seems to skip white balance in some light. Every Photo-mode shot now logs AWB/colour metadata and the photo's mean RGB; the owner should take an HQ and an Off shot of the same scene and share the logs. Burst modes always request NR and edge Off, so they are not affected.
 
+- **HDR glitches (fixed, build after 16):** owner photos showed double images (laptop screen) and blocky patches (lamp glow, bedsheet). Causes: no deghosting in exposure fusion, and per-tile shifts on surfaces without detail. Fixes: HDR uses one shift per bracket from detailed, well-exposed tiles; flat tiles in Stack/Night take the frame's overall shift; ghosted areas take the reference's content (brightness-matched) before fusion weights are computed. Host test: a moving bright object now adds 0.04 levels instead of 27.
+
 ## Ideas for later (not scheduled)
 
 Raised by the owner on Oct 17, 2026. Consider them when planning each phase; neither changes Phases 1 to 3.
