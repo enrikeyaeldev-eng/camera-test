@@ -251,7 +251,7 @@ Work one phase at a time, keep `main` always installable, and stop at every phas
 
 - Read `docs/PLAN.md` before each session and tick tasks off in it as they are completed.
 - Small commits with clear messages; push to `main` only when `./gradlew assembleDebug` succeeds in the Codespace (or, if the SDK cannot be installed there, when the GitHub Actions build passes on the branch).
-- Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): summary`, with types `feat`, `fix`, `docs`, `build`, `ci`, `refactor`, `test`, `chore` and scopes such as `app`, `camera`, `processing`, `diagnostics`. Branch names use the same types: `feat/phase-1-basic-camera`, `fix/burst-timeout`, `docs/plan-update`.
+- Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): summary`, with types `feat`, `fix`, `docs`, `build`, `ci`, `refactor`, `test`, `chore` and scopes such as `app`, `camera`, `processing`, `diagnostics`. Work directly on `main`; do not create feature branches.
 - Never commit build output, keystores, passwords or `local.properties`. Never ask the owner to paste credentials into a chat.
 - Never assume a camera feature exists: check `CameraCharacteristics` at runtime and degrade gracefully, logging what was missing.
 - All camera work on a dedicated background thread; never block the UI thread; close cameras and sessions in `onPause`.
