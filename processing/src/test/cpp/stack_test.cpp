@@ -416,6 +416,53 @@ int main() {
         check(std::fabs(nearEdge - subjectB) < 0.03, "no halo along the subject's edge", nearEdge - subjectB);
     }
 
+    // --- Frames from before the shutter press: two preview frames at twice the burst's exposure (bright
+    // area clipped) plus four burst frames. The reference must be a burst frame, the extra frames must lower
+    // the noise, and the clipped area must not turn grey.
+    {
+        auto enc = [](float l) { return l <= 0.0031308f ? 12.92f * l : 1.055f * std::pow(l, 1.f / 2.4f) - 0.055f; };
+        auto linear = [&](int xx, int yy) { return xx < W / 2 ? 0.04f + 0.10f * yy / H : 0.75f; };  // dark | bright
+        std::normal_distribution<float> n5(0.f, 5.f);
+        auto run = [&](bool withPre, std::vector<float>* merged, int* reference) {
+            Stack s(W, H, 6);
+            const int pre = withPre ? 2 : 0;
+            for (int i = 0; i < pre + 4; ++i) {
+                const float k = i < pre ? 2.f : 1.f;
+                for (int yy = 0; yy < H; ++yy)
+                    for (int xx = 0; xx < W; ++xx) {
+                        const float v = 255.f * enc(std::min(1.f, k * linear(xx + (xx / 7 % 2), yy))) + n5(rng);
+                        y[yy * W + xx] = static_cast<uint8_t>(std::clamp(v, 0.f, 255.f));
+                    }
+                for (int c = 0; c < W / 2 * H / 2; ++c) { u[c] = 128; v[c] = 128; }
+                s.addFrame(y.data(), W, 1, u.data(), v.data(), W / 2, 1, i, k);
+            }
+            const a56::StackStats st = s.process();
+            *reference = st.reference - pre;
+            *merged = s.mergedY();
+        };
+        std::vector<float> with, without;
+        int refWith, refWithout;
+        run(true, &with, &refWith);
+        run(false, &without, &refWithout);
+        auto noiseOf = [&](const std::vector<float>& m) {  // deviation from the true dark area
+            double e = 0;
+            long cnt = 0;
+            for (int yy = 64; yy < H - 64; ++yy)
+                for (int xx = 64; xx < W / 2 - 64; ++xx, ++cnt) e += std::fabs(m[yy * W + xx] - 255.f * enc(linear(xx + (xx / 7 % 2), yy)));
+            return e / cnt;
+        };
+        double bright = 0;
+        long cnt = 0;
+        for (int yy = 64; yy < H - 64; ++yy)
+            for (int xx = W / 2 + 64; xx < W - 64; ++xx, ++cnt) bright += with[yy * W + xx];
+        bright /= cnt;
+        const double truth = 255.0 * enc(0.75f);
+        std::printf("pre-press frames: noise %.2f -> %.2f, bright area %.1f (true %.1f)\n", noiseOf(without), noiseOf(with), bright, truth);
+        check(refWith >= 0, "reference is a burst frame, not a pre-press frame", refWith);
+        check(noiseOf(with) < noiseOf(without) * 0.95, "pre-press frames lower the noise", noiseOf(with) / noiseOf(without));
+        check(std::fabs(bright - truth) < 2.0, "clipped pre-press areas leave the highlight intact", bright - truth);
+    }
+
     std::printf("%s\n", failures == 0 ? "ALL PASSED" : "FAILURES");
     return failures == 0 ? 0 : 1;
 }

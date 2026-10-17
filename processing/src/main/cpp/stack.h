@@ -129,6 +129,8 @@ private:
 
     std::vector<Level> pyramid(const Frame& f) const;
     struct Alignment;
+    // Brings frame i to the reference exposure in place and marks the merge tiles it had clipped.
+    void matchExposure(int i, double refExposure, const Alignment& al);
     void mergeRobust(const Alignment& al, const std::vector<int>& rejected, StackStats& st, MergeAccelerator* accel);
     void fuseExposures(const Alignment& al, StackStats& st);
     std::vector<Shift> align(const std::vector<Level>& ref, const std::vector<Level>& alt, int* tilesX0, int* tilesY0) const;
@@ -136,6 +138,7 @@ private:
 
     int width_, height_, capacity_;
     std::vector<Frame> frames_;
+    std::vector<std::vector<char>> clipTiles_;  // per frame: merge tiles it had clipped (other exposure only)
     std::vector<float> mergedY_;   // width*height, 0..255
     std::vector<float> mergedV_;   // (width/2)*(height/2)
     std::vector<float> mergedU_;

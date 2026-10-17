@@ -407,7 +407,16 @@ StackStats Stack::process(const ProcessParams& params) {
         std::sort(order.begin(), order.end(), [&](int a, int b) { return frames_[a].exposure < frames_[b].exposure; });
         ref = order[n / 2];
     } else {
-        ref = static_cast<int>(std::max_element(st.sharpness.begin(), st.sharpness.end()) - st.sharpness.begin());
+        // The sharpest frame of the main exposure: frames from before the shutter press (another exposure)
+        // only add detail and noise reduction, they never become the reference.
+        std::vector<int> peers(n, 0);
+        for (int i = 0; i < n; ++i)
+            for (int j = 0; j < n; ++j) peers[i] += std::fabs(frames_[j].exposure / frames_[i].exposure - 1.0) < 0.05;
+        const int most = *std::max_element(peers.begin(), peers.end());
+        ref = -1;
+        for (int i = 0; i < n; ++i) {
+            if (peers[i] == most && (ref < 0 || st.sharpness[i] > st.sharpness[ref])) ref = i;
+        }
         for (int i = 0; i < n; ++i) {
             if (i != ref && st.sharpness[i] < params.minSharpness * best) st.rejected.push_back(i);
         }
@@ -540,7 +549,15 @@ StackStats Stack::process(const ProcessParams& params) {
     const double t1 = nowMs();
     st.alignMs = t1 - t0;
 
-    // 3. Merge (same exposure) or fuse (bracketed exposures).
+    // 3. Merge (same exposure) or fuse (bracketed exposures). For the merge, frames with another exposure
+    //    are brightness-matched to the reference first; where they were clipped they carry no information,
+    //    so those tiles get no weight.
+    clipTiles_.assign(n, {});
+    if (!params.hdr) {
+        for (int i = 0; i < n; ++i) {
+            if (i != ref && !isRejected(i)) matchExposure(i, frames_[ref].exposure, al);
+        }
+    }
     if (params.hdr && n > 1) {
         fuseExposures(al, st);
     } else {
@@ -549,6 +566,53 @@ StackStats Stack::process(const ProcessParams& params) {
     st.mergeMs = nowMs() - t1;
     std::vector<Frame>().swap(frames_);
     return st;
+}
+
+void Stack::matchExposure(int i, double refExposure, const Alignment& al) {
+    Frame& f = frames_[i];
+    const double ratio = refExposure / f.exposure;
+    if (std::fabs(ratio - 1.0) < 0.05) return;
+    const int W = width_, H = height_, CW = W / 2, CH = H / 2, S = kMergeStep, C = 16;
+    // Clipped 16-px cells, in the frame's own coordinates.
+    const int cx = (W + C - 1) / C, cy = (H + C - 1) / C;
+    std::vector<char> cell(static_cast<size_t>(cx) * cy, 0);
+    for (int y = 0; y < H; ++y) {
+        const uint8_t* row = f.y.data() + static_cast<size_t>(y) * W;
+        for (int x = 0; x < W; ++x) if (row[x] >= 250) cell[static_cast<size_t>(y / C) * cx + x / C] = 1;
+    }
+    const int mtx = W / S + 2, mty = H / S + 2;
+    std::vector<char>& clip = clipTiles_[i];
+    clip.assign(static_cast<size_t>(mtx) * mty, 0);
+    for (int ty = 0; ty < mty; ++ty) {
+        for (int tx = 0; tx < mtx; ++tx) {
+            const Shift sh = al.at(i, tx * S, ty * S);
+            const int x0 = clampi(tx * S - S + sh.dx, 0, W - 1), x1 = clampi(tx * S + S - 1 + sh.dx, 0, W - 1);
+            const int y0 = clampi(ty * S - S + sh.dy, 0, H - 1), y1 = clampi(ty * S + S - 1 + sh.dy, 0, H - 1);
+            bool any = false;
+            for (int yy = y0 / C; yy <= y1 / C && !any; ++yy)
+                for (int xx = x0 / C; xx <= x1 / C && !any; ++xx) any = cell[static_cast<size_t>(yy) * cx + xx] != 0;
+            clip[static_cast<size_t>(ty) * mtx + tx] = any;
+        }
+    }
+    // Luma through the linear-light gain; chroma scaled with its pixel's luma, which keeps the hue.
+    uint8_t lut[256];
+    float scale[256];
+    for (int v = 0; v < 256; ++v) {
+        const float lin = srgbDecode(v / 255.f) * static_cast<float>(ratio);
+        lut[v] = static_cast<uint8_t>(std::lround(255.f * srgbEncode(std::min(1.f, lin))));
+        scale[v] = (lut[v] + 1.f) / (v + 1.f);
+    }
+    parallelFor(CH, [&](int y) {
+        for (int x = 0; x < CW; ++x) {
+            const uint8_t yv = f.y[static_cast<size_t>(2 * y) * W + 2 * x];
+            uint8_t* vu = f.vu.data() + (static_cast<size_t>(y) * CW + x) * 2;
+            for (int k = 0; k < 2; ++k) {
+                vu[k] = static_cast<uint8_t>(clampi(static_cast<int>(std::lround(128.f + (vu[k] - 128.f) * scale[yv])), 0, 255));
+            }
+        }
+    });
+    for (uint8_t& v : f.y) v = lut[v];
+    f.exposure = refExposure;
 }
 
 void Stack::mergeRobust(const Alignment& al, const std::vector<int>& rejected, StackStats& st, MergeAccelerator* accel) {
@@ -644,6 +708,9 @@ void Stack::mergeRobust(const Alignment& al, const std::vector<int>& rejected, S
         st.noise[i] = noise;
         const float lo = 1.5f * noise, hi = 3.0f * noise;
         for (size_t t = 0; t < d.size(); ++t) wi[t] = d[t] <= lo ? 1.f : (d[t] >= hi ? 0.f : (hi - d[t]) / (hi - lo));
+        if (!clipTiles_[i].empty()) {
+            for (size_t t = 0; t < tiles; ++t) if (clipTiles_[i][t]) wi[t] = 0.f;
+        }
     }
     st.tileWeight.assign(tiles, 1.f);
     if (n > 1) {
