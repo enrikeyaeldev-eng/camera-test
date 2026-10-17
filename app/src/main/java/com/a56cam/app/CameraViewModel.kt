@@ -62,7 +62,11 @@ class CameraViewModel(app: Application) : AndroidViewModel(app) {
                 val app = getApplication<Application>()
                 val uri = withContext(Dispatchers.IO) { PhotoStore.saveJpeg(app, bytes) }
                 val thumb = withContext(Dispatchers.Default) { PhotoStore.thumbnail(bytes) }
-                AppLog.i("Saved photo $uri (${bytes.size} bytes)")
+                val opts = settings.values.value
+                AppLog.i(
+                    "Saved photo $uri (${bytes.size} bytes) settings nr=${opts.noiseReduction} edge=${opts.edge} " +
+                        "q=${opts.jpegQuality} mean ${thumb?.let { PhotoStore.meanRgb(it) }}",
+                )
                 _photo.update { it.copy(lastUri = uri, thumbnail = thumb, saving = false, shots = it.shots + 1) }
             } catch (e: CancellationException) {
                 _photo.update { it.copy(saving = false) }

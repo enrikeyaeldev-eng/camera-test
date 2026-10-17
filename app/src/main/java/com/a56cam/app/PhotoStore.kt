@@ -42,6 +42,23 @@ object PhotoStore {
         return uri
     }
 
+    /** Mean red, green and blue of a bitmap (0..255), logged with each photo to catch colour casts. */
+    fun meanRgb(bitmap: Bitmap): String {
+        var r = 0L
+        var g = 0L
+        var b = 0L
+        val step = maxOf(1, minOf(bitmap.width, bitmap.height) / 64)
+        var n = 0L
+        for (y in 0 until bitmap.height step step) for (x in 0 until bitmap.width step step) {
+            val c = bitmap.getPixel(x, y)
+            r += (c shr 16) and 0xFF
+            g += (c shr 8) and 0xFF
+            b += c and 0xFF
+            n++
+        }
+        return if (n == 0L) "n/a" else "R=${r / n} G=${g / n} B=${b / n}"
+    }
+
     /** A small, upright preview of a JPEG for the thumbnail button. */
     fun thumbnail(bytes: ByteArray, targetPx: Int = 192): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }

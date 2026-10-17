@@ -405,10 +405,33 @@ class CameraController(context: Context) {
     }
 
     private fun stillCallback(jpeg: CompletableDeferred<ByteArray>) = object : CameraCaptureSession.CaptureCallback() {
+        override fun onCaptureCompleted(s: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+            AppLog.i("Camera ${openLens?.id}: still result ${describeColour(result)}")
+        }
+
         override fun onCaptureFailed(s: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
             AppLog.e("Camera ${openLens?.id}: still capture failed reason=${failure.reason} ${CameraOps.describeRequest(request)}")
             jpeg.completeExceptionally(CameraException("Capture failed (reason ${failure.reason})"))
         }
+    }
+
+    /** Exposure, white balance and colour settings the camera actually used, for diagnosing colour casts. */
+    private fun describeColour(r: CaptureResult): String = buildString {
+        append("exposureNs=").append(r.get(CaptureResult.SENSOR_EXPOSURE_TIME))
+        append(" iso=").append(r.get(CaptureResult.SENSOR_SENSITIVITY))
+        append(" aeMode=").append(r.get(CaptureResult.CONTROL_AE_MODE))
+        append(" aeState=").append(r.get(CaptureResult.CONTROL_AE_STATE))
+        append(" awbMode=").append(r.get(CaptureResult.CONTROL_AWB_MODE))
+        append(" awbState=").append(r.get(CaptureResult.CONTROL_AWB_STATE))
+        append(" awbLock=").append(r.get(CaptureResult.CONTROL_AWB_LOCK))
+        append(" ccMode=").append(r.get(CaptureResult.COLOR_CORRECTION_MODE))
+        append(" ccGains=").append(r.get(CaptureResult.COLOR_CORRECTION_GAINS))
+        append(" ccTransform=").append(r.get(CaptureResult.COLOR_CORRECTION_TRANSFORM))
+        append(" nr=").append(r.get(CaptureResult.NOISE_REDUCTION_MODE))
+        append(" edge=").append(r.get(CaptureResult.EDGE_MODE))
+        append(" tonemap=").append(r.get(CaptureResult.TONEMAP_MODE))
+        append(" sceneMode=").append(r.get(CaptureResult.CONTROL_SCENE_MODE))
+        append(" captureIntent=").append(r.get(CaptureResult.CONTROL_CAPTURE_INTENT))
     }
 
     private fun onJpeg(reader: ImageReader) {
