@@ -227,7 +227,8 @@ int main() {
         ramp.render(natural, [&](int row, const float* rgb) { if (row == H / 2) for (int x = 0; x < W; ++x) rn[x] = rgb[3 * x + 1]; });
         ramp.render(bright, [&](int row, const float* rgb) { if (row == H / 2) for (int x = 0; x < W; ++x) rb[x] = rgb[3 * x + 1]; });
         bool monotonic = true;
-        for (int x = 1; x < W; ++x) monotonic = monotonic && rb[x] >= rb[x - 1] - 1e-4f;
+        // Local tone mapping may dip by a fraction of a JPEG step inside a run of equal input values.
+        for (int x = 1; x < W; ++x) monotonic = monotonic && rb[x] >= rb[x - 1] - 0.5f / 255.f;
         check(monotonic, "bright look keeps tones in order", 0);
         check(rb[W / 2] > rn[W / 2] + 0.03f, "bright look lifts midtones", rb[W / 2] - rn[W / 2]);
         check(rb[W - 1] > 0.99f && rb[0] < 0.01f, "bright look keeps black black and white white", rb[W - 1]);
@@ -378,6 +379,40 @@ int main() {
             }
         std::printf("HDR ghost: mean |diff| %.2f, signed %.2f, brightest 16px block %+.2f\n", ghost, signedSum / ni, maxBlock);
         check(ghost < 8.0, "HDR leaves out an object that moved in one bracket (ghost level)", ghost);
+    }
+
+    // --- Local tone mapping: a dark subject next to a bright lamp (HDR burst, gain 4) is lifted, the lamp is
+    // held back but stays brighter than the subject, and the subject has no halo along the edge.
+    {
+        Stack lamp(W, H, 1);
+        std::normal_distribution<float> tex(0.f, 6.f);
+        for (int yy = 0; yy < H; ++yy)
+            for (int xx = 0; xx < W; ++xx) y[yy * W + xx] = static_cast<uint8_t>(std::clamp((xx < W / 2 ? 70.f : 235.f) + tex(rng), 0.f, 255.f));
+        for (int k = 0; k < W / 2 * H / 2; ++k) { u[k] = 128; v[k] = 128; }
+        lamp.addFrame(y.data(), W, 1, u.data(), v.data(), W / 2, 1, 0);
+        lamp.process();
+        a56::RenderParams natural, bright;
+        natural.gain = bright.gain = 4.f;
+        natural.sharpen = bright.sharpen = 0.f;
+        bright.look = 1;
+        auto columnMeans = [&](const a56::RenderParams& p) {
+            std::vector<double> col(W, 0.0);
+            lamp.render(p, [&](int, const float* rgb) { for (int x = 0; x < W; ++x) col[x] += rgb[3 * x + 1] / H; });
+            return col;
+        };
+        const std::vector<double> cn = columnMeans(natural), cb = columnMeans(bright);
+        auto band = [&](const std::vector<double>& c, int x0, int x1) {
+            double s = 0;
+            for (int x = x0; x < x1; ++x) s += c[x];
+            return s / (x1 - x0);
+        };
+        const double subjectN = band(cn, 100, 300), subjectB = band(cb, 100, 300);
+        const double lampN = band(cn, W - 300, W - 100), lampB = band(cb, W - 300, W - 100);
+        const double nearEdge = band(cb, W / 2 - 24, W / 2 - 8);
+        std::printf("local tone: subject %.3f -> %.3f, lamp %.3f -> %.3f, subject near edge %.3f\n", subjectN, subjectB, lampN, lampB, nearEdge);
+        check(subjectB > subjectN + 0.05, "bright look lifts a dark subject next to a lamp", subjectB - subjectN);
+        check(lampB < lampN - 0.02 && lampB > subjectB + 0.15, "bright look holds the lamp back, still brighter", lampN - lampB);
+        check(std::fabs(nearEdge - subjectB) < 0.03, "no halo along the subject's edge", nearEdge - subjectB);
     }
 
     std::printf("%s\n", failures == 0 ? "ALL PASSED" : "FAILURES");

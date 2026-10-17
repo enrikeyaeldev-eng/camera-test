@@ -840,22 +840,79 @@ void Stack::outputSize(int rotation, int* w, int* h) const {
 }
 
 struct Stack::Prepared {
-    std::vector<float> lut;  // 0..255 YUV-domain value → 0..1 output (tone mapped, or linear for DNG)
+    // Tone: YUV-domain value 0..255 → linear light (decode), times the local gain, then lut → 0..1 output.
+    // lut is indexed by sqrt(x / linMax), so dark tones get most of the entries.
+    std::vector<float> decode;
+    std::vector<float> lut;
+    float linMax = 1.f;
     int ow = 0, oh = 0, rotation = 0;
     float sharpen = 0;
     float saturation = 1.f;    // chroma scale
     float vShift = 0.f, uShift = 0.f;  // chroma offsets (white-balance pull)
+    // Local tone mapping: guided-filter coefficients on a grid of cell × cell pixels. The base layer
+    // (large-scale brightness, log2 linear) of a pixel is a·log2(luma) + b. Areas darker than shadowKey are
+    // lifted, areas brighter than highlightKey are held back (both log2, before the global gain).
+    int cell = 0, gw = 0, gh = 0;
+    std::vector<float> ga, gb;
+    bool local = false;
+    float shadowKey = 0.f, highlightKey = 0.f, maxLift = 0.f, maxCut = 0.f;
 };
+
+namespace {
+
+constexpr int kLtmCell = 16;      // guide grid: 16 × 16 pixels per cell
+constexpr int kLtmRadius = 8;     // box radius in cells (≈ 270 px window)
+constexpr float kLtmEps = 0.15f;  // log2² units: edges stronger than ≈ 0.4 EV are kept sharp
+constexpr float kLogFloor = -10.f;
+// Bright look tuned against the Samsung camera on a backlit indoor portrait (lamp behind the subject):
+// shadows below 0.3 (linear, after gain) are lifted by 60 % of the distance in stops, up to 1 stop;
+// areas above 0.25 are held back by 80 %, at most by the burst's own headroom so clipped lamps stay white.
+constexpr float kLiftStrength = 0.6f, kShadowKey = 0.3f, kMaxLift = 1.0f;
+constexpr float kCutStrength = 0.8f, kHighlightKey = 0.25f;
+// Global curve: linear up to the knee, then an exponential shoulder that reaches white at the gain.
+constexpr float kKnee = 0.4f;
+
+// Mean over a (2r+1)² box, clamped at the borders, via an integral image.
+std::vector<float> boxMean(const std::vector<float>& src, int w, int h, int r) {
+    std::vector<double> sum(static_cast<size_t>(w + 1) * (h + 1), 0.0);
+    for (int y = 0; y < h; ++y) {
+        double row = 0;
+        for (int x = 0; x < w; ++x) {
+            row += src[static_cast<size_t>(y) * w + x];
+            sum[static_cast<size_t>(y + 1) * (w + 1) + x + 1] = sum[static_cast<size_t>(y) * (w + 1) + x + 1] + row;
+        }
+    }
+    std::vector<float> out(src.size());
+    for (int y = 0; y < h; ++y) {
+        const int y0 = std::max(0, y - r), y1 = std::min(h, y + r + 1);
+        for (int x = 0; x < w; ++x) {
+            const int x0 = std::max(0, x - r), x1 = std::min(w, x + r + 1);
+            const double s = sum[static_cast<size_t>(y1) * (w + 1) + x1] - sum[static_cast<size_t>(y0) * (w + 1) + x1] -
+                             sum[static_cast<size_t>(y1) * (w + 1) + x0] + sum[static_cast<size_t>(y0) * (w + 1) + x0];
+            out[static_cast<size_t>(y) * w + x] = static_cast<float>(s / ((x1 - x0) * (y1 - y0)));
+        }
+    }
+    return out;
+}
+
+inline float lookup(const std::vector<float>& t, float f) {
+    const int last = static_cast<int>(t.size()) - 1;
+    f = std::min(std::max(f, 0.f), static_cast<float>(last));
+    const int i = std::min(static_cast<int>(f), last - 1);
+    return t[i] + (t[i + 1] - t[i]) * (f - i);
+}
+
+}  // namespace
 
 void Stack::renderRow(const Prepared& prep, int oy, float* rgb) const {
     const int W = width_, H = height_, CW = W / 2;
     const float* Y = mergedY_.data();
-    const int lutMax = static_cast<int>(prep.lut.size()) - 1;
-    auto tone = [&](float c) {
-        const float f = std::min(std::max(c, 0.f), 255.f) * (lutMax / 255.f);
-        const int i = std::min(static_cast<int>(f), lutMax - 1);
-        const float t = f - i;
-        return prep.lut[i] + (prep.lut[i + 1] - prep.lut[i]) * t;
+    const float decScale = (prep.decode.size() - 1) / 255.f;
+    const float lutLast = static_cast<float>(prep.lut.size() - 1);
+    const float invLinMax = 1.f / prep.linMax;
+    auto tone = [&](float c, float localGain) {
+        const float x = lookup(prep.decode, c * decScale) * localGain;
+        return lookup(prep.lut, std::sqrt(std::max(0.f, x) * invLinMax) * lutLast);
     };
     for (int ox = 0; ox < prep.ow; ++ox) {
         int sx, sy;
@@ -865,7 +922,8 @@ void Stack::renderRow(const Prepared& prep, int oy, float* rgb) const {
             case 270: sx = W - 1 - oy; sy = ox; break;
             default: sx = ox; sy = oy; break;
         }
-        float luma = Y[static_cast<size_t>(sy) * W + sx];
+        const float plain = Y[static_cast<size_t>(sy) * W + sx];
+        float luma = plain;
         if (prep.sharpen > 0.f) {
             float blur = 0;
             for (int dy = -1; dy <= 1; ++dy) {
@@ -874,12 +932,35 @@ void Stack::renderRow(const Prepared& prep, int oy, float* rgb) const {
             }
             luma += prep.sharpen * (luma - blur / 9.f);
         }
+        float localGain = 1.f;
+        if (prep.local) {
+            // Bilinear guided-filter coefficients at this pixel, then the base layer from the pixel's own luma:
+            // edges between bright and dark areas stay sharp, so there are no halos around lamps or windows.
+            const float gx = std::min(std::max((sx + 0.5f) / prep.cell - 0.5f, 0.f), prep.gw - 1.f);
+            const float gy = std::min(std::max((sy + 0.5f) / prep.cell - 0.5f, 0.f), prep.gh - 1.f);
+            const int x0 = std::min(static_cast<int>(gx), prep.gw - 2 < 0 ? 0 : prep.gw - 2);
+            const int y0 = std::min(static_cast<int>(gy), prep.gh - 2 < 0 ? 0 : prep.gh - 2);
+            const int x1 = std::min(x0 + 1, prep.gw - 1), y1 = std::min(y0 + 1, prep.gh - 1);
+            const float fx = gx - x0, fy = gy - y0;
+            auto bil = [&](const std::vector<float>& g) {
+                const float top = g[static_cast<size_t>(y0) * prep.gw + x0] * (1 - fx) + g[static_cast<size_t>(y0) * prep.gw + x1] * fx;
+                const float bot = g[static_cast<size_t>(y1) * prep.gw + x0] * (1 - fx) + g[static_cast<size_t>(y1) * prep.gw + x1] * fx;
+                return top * (1 - fy) + bot * fy;
+            };
+            const float logL = std::max(kLogFloor, std::log2(std::max(1e-6f, lookup(prep.decode, plain * decScale))));
+            const float base = bil(prep.ga) * logL + bil(prep.gb);
+            // The two ranges overlap slightly; adding both keeps the gain continuous in the overlap.
+            float delta = 0.f;
+            if (base < prep.shadowKey) delta += std::min(prep.maxLift, kLiftStrength * (prep.shadowKey - base));
+            if (base > prep.highlightKey) delta += std::max(-prep.maxCut, kCutStrength * (prep.highlightKey - base));
+            localGain = std::exp2(delta);
+        }
         const size_t c = static_cast<size_t>(sy / 2) * CW + sx / 2;
         const float v = (mergedV_[c] - 128.f + prep.vShift) * prep.saturation;
         const float u = (mergedU_[c] - 128.f + prep.uShift) * prep.saturation;
-        rgb[3 * ox] = tone(luma + 1.402f * v);
-        rgb[3 * ox + 1] = tone(luma - 0.344136f * u - 0.714136f * v);
-        rgb[3 * ox + 2] = tone(luma + 1.772f * u);
+        rgb[3 * ox] = tone(luma + 1.402f * v, localGain);
+        rgb[3 * ox + 1] = tone(luma - 0.344136f * u - 0.714136f * v, localGain);
+        rgb[3 * ox + 2] = tone(luma + 1.772f * u, localGain);
     }
 }
 
@@ -888,26 +969,83 @@ Stack::Prepared Stack::prepare(const RenderParams& p) const {
     prep.rotation = p.rotation;
     prep.sharpen = p.sharpen;
     outputSize(p.rotation, &prep.ow, &prep.oh);
-    // Undo the underexposure in linear light, then roll highlights off so the brightest input stays white
-    // (extended Reinhard with white point = gain; gain 1 leaves the image unchanged).
     const float gain = std::max(1.f, p.gain);
     const bool bright = p.look == 1;
+    prep.decode.resize(4097);
+    for (size_t i = 0; i < prep.decode.size(); ++i) prep.decode[i] = srgbDecode(static_cast<float>(i) / (prep.decode.size() - 1));
+
+    if (bright && !mergedY_.empty()) {
+        // Local tone mapping (the iPhone/Pixel look): a face in front of a lamp is lifted while the lamp and
+        // the bright wall around it are held back; fine detail is untouched.
+        prep.local = true;
+        prep.shadowKey = std::log2(kShadowKey / gain);
+        prep.highlightKey = std::log2(kHighlightKey / gain);
+        prep.maxLift = kMaxLift;
+        prep.maxCut = std::log2(gain);
+        prep.cell = kLtmCell;
+        prep.gw = std::max(1, (width_ + kLtmCell - 1) / kLtmCell);
+        prep.gh = std::max(1, (height_ + kLtmCell - 1) / kLtmCell);
+        std::vector<float> logLut(256);
+        for (int i = 0; i < 256; ++i) logLut[i] = std::max(kLogFloor, std::log2(std::max(1e-6f, srgbDecode(i / 255.f))));
+        const size_t cells = static_cast<size_t>(prep.gw) * prep.gh;
+        std::vector<float> mean(cells), meanSq(cells);
+        parallelFor(prep.gh, [&](int gy) {
+            for (int gx = 0; gx < prep.gw; ++gx) {
+                double s = 0, s2 = 0;
+                int n = 0;
+                for (int y = gy * kLtmCell; y < std::min(height_, (gy + 1) * kLtmCell); ++y) {
+                    const float* row = mergedY_.data() + static_cast<size_t>(y) * width_;
+                    for (int x = gx * kLtmCell; x < std::min(width_, (gx + 1) * kLtmCell); ++x) {
+                        const float l = logLut[clampi(static_cast<int>(row[x] + 0.5f), 0, 255)];
+                        s += l;
+                        s2 += l * l;
+                        ++n;
+                    }
+                }
+                mean[static_cast<size_t>(gy) * prep.gw + gx] = static_cast<float>(s / n);
+                meanSq[static_cast<size_t>(gy) * prep.gw + gx] = static_cast<float>(s2 / n);
+            }
+        });
+        // Fast guided filter (He & Sun) with the log luma as its own guide.
+        const std::vector<float> mI = boxMean(mean, prep.gw, prep.gh, kLtmRadius);
+        const std::vector<float> mII = boxMean(meanSq, prep.gw, prep.gh, kLtmRadius);
+        std::vector<float> a(cells), b(cells);
+        for (size_t i = 0; i < cells; ++i) {
+            const float var = std::max(0.f, mII[i] - mI[i] * mI[i]);
+            a[i] = var / (var + kLtmEps);
+            b[i] = mI[i] - a[i] * mI[i];
+        }
+        prep.ga = boxMean(a, prep.gw, prep.gh, kLtmRadius);
+        prep.gb = boxMean(b, prep.gw, prep.gh, kLtmRadius);
+    }
+
+    // Undo the underexposure in linear light, then roll highlights off above the knee so the brightest
+    // input (x = gain) lands exactly on white; midtones stay linear instead of being darkened.
+    prep.linMax = std::exp2(prep.maxLift);
+    // Without headroom (gain 1) there is nothing to roll off: the knee moves to white and the curve is identity.
+    const float knee = kKnee + (1.f - kKnee) * std::min(1.f, std::max(0.f, (1.25f - gain) / 0.25f));
+    const float shoulder = 1.f - knee;
+    const float shoulderNorm = shoulder > 1e-3f ? 1.f - std::exp(-(gain - knee) / shoulder) : 1.f;
     prep.lut.resize(4096);
     for (size_t i = 0; i < prep.lut.size(); ++i) {
-        const float x = gain * srgbDecode(static_cast<float>(i) / (prep.lut.size() - 1));
-        float t = srgbEncode(std::min(1.f, x * (1.f + x / (gain * gain)) / (1.f + x)));
+        const float f = static_cast<float>(i) / (prep.lut.size() - 1);
+        const float x = gain * prep.linMax * f * f;
+        const float y = x < knee || shoulder <= 1e-3f ? x : knee + shoulder * (1.f - std::exp(-(x - knee) / shoulder)) / shoulderNorm;
+        float t = srgbEncode(std::min(1.f, y));
         if (bright) {
             // Lift shadows and midtones (bright, airy), then a mild S-curve so it does not look flat.
             t = std::pow(t, 0.85f);
             const float s = t * t * (3.f - 2.f * t);
-            t = t + 0.18f * (s - t);
+            t = t + 0.3f * (s - t);
         }
         prep.lut[i] = t;
     }
     if (bright && !mergedV_.empty()) {
-        prep.saturation = 1.08f;
-        // Grey-world estimate of the remaining colour cast from mid-grey, unsaturated pixels; a quarter of it
-        // is removed, so warm light stays warm but less orange.
+        // Slightly less colour than the camera: the per-channel tone curve already adds saturation, and skin
+        // came out redder than on the Samsung camera.
+        prep.saturation = 0.92f;
+        // Grey-world estimate of the remaining colour cast from mid-grey, unsaturated pixels; half of it
+        // is removed, so warm light stays warm but not orange.
         double sv = 0, su = 0;
         long n = 0;
         const int CW = width_ / 2, CH = height_ / 2;
@@ -923,8 +1061,8 @@ Stack::Prepared Stack::prepare(const RenderParams& p) const {
             }
         }
         if (n > 100) {
-            prep.vShift = -0.25f * static_cast<float>(sv / n);
-            prep.uShift = -0.25f * static_cast<float>(su / n);
+            prep.vShift = -0.5f * static_cast<float>(sv / n);
+            prep.uShift = -0.5f * static_cast<float>(su / n);
         }
     }
     return prep;
@@ -947,7 +1085,10 @@ bool Stack::writeLinearDng(const std::string& path, const RenderParams& p, const
     linear.look = 0;  // no look in the DNG: Lightroom does the styling
     Prepared prep = prepare(linear);
     prep.sharpen = 0.f;  // leave sharpening to Lightroom
-    for (size_t i = 0; i < prep.lut.size(); ++i) prep.lut[i] = srgbDecode(static_cast<float>(i) / (prep.lut.size() - 1));
+    for (size_t i = 0; i < prep.lut.size(); ++i) {
+        const float f = static_cast<float>(i) / (prep.lut.size() - 1);
+        prep.lut[i] = std::min(1.f, prep.linMax * f * f);
+    }
     const double baselineExposure = std::log2(std::max(1.f, p.gain));
     // XYZ (D65) → linear sRGB, i.e. the "camera" space of this data.
     const std::vector<double> xyzToSrgb = {3.2404542, -1.5371385, -0.4985314, -0.9692660, 1.8760108,
