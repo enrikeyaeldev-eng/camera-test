@@ -135,32 +135,34 @@ Six phases, each ending in an installable APK. Phase 0 ends with a hard stop: th
 
 Setup:
 
-- [ ] Gradle project with the four modules, Kotlin, Compose, NDK and CMake wired up with a trivial JNI call that proves native code runs.
-- [ ] `.devcontainer`, `.gitignore`, GitHub Actions workflow, signing from secrets, rolling `latest` release.
-- [ ] In-app log file, crash handler and "Share logs" button.
-- [ ] Camera permission flow.
+- [x] Gradle project with the four modules, Kotlin, Compose, NDK and CMake wired up with a trivial JNI call that proves native code runs.
+- [x] `.devcontainer`, `.gitignore`, GitHub Actions workflow, signing from secrets, rolling `latest` release.
+- [x] In-app log file, crash handler and "Share logs" button.
+- [x] Camera permission flow.
 
 Static report (no capture needed), for every ID from `getCameraIdList()` and every physical ID under logical cameras:
 
-- [ ] Every `CameraCharacteristics` key and value, including vendor keys, written as JSON.
-- [ ] Stream configuration map: output sizes and minimum frame durations for YUV_420_888, JPEG, PRIVATE, HEIC, JPEG_R and RAW formats.
-- [ ] Available AE, AF, AWB, noise-reduction, edge, tonemap, hot-pixel and lens-shading modes.
-- [ ] Available capture-request and capture-result keys.
-- [ ] `CameraExtensionCharacteristics`: supported extensions per camera, their output sizes, capture latency range, and supported request keys.
-- [ ] Hidden IDs: try opening IDs 0 to 20 and a few high numbers not in the list; record which open and stream.
+- [x] Every `CameraCharacteristics` key and value, including vendor keys, written as JSON.
+- [x] Stream configuration map: output sizes and minimum frame durations for YUV_420_888, JPEG, PRIVATE, HEIC, JPEG_R and RAW formats.
+- [x] Available AE, AF, AWB, noise-reduction, edge, tonemap, hot-pixel and lens-shading modes.
+- [x] Available capture-request and capture-result keys.
+- [x] `CameraExtensionCharacteristics`: supported extensions per camera, their output sizes, capture latency range, and supported request keys.
+- [x] Hidden IDs: try opening IDs 0 to 20 and a few high numbers not in the list; record which open and stream.
 
 Live tests on the back camera, each saving frames and results:
 
-- [ ] **Burst speed:** request 15 full-size YUV frames with `captureBurst` and with a repeating request; record real fps from sensor timestamps and any dropped frames.
-- [ ] **Manual exposure:** AE off with fixed exposure times (1/1000 s to the longest allowed) and ISO values; check `CaptureResult` and image brightness to see whether they were honoured.
-- [ ] **EV bracketing:** compensation at -2, 0 and +2 EV; confirm brightness changes and how many frames it takes to settle.
-- [ ] **Processing modes:** capture with noise reduction and edge modes at off or minimal versus fast or high quality; save crops to compare.
-- [ ] **Extensions:** one capture in each supported extension, saved as JPEG.
-- [ ] **Ultra HDR:** one JPEG_R capture if supported.
+- [x] **Burst speed:** request 15 full-size YUV frames with `captureBurst` and with a repeating request; record real fps from sensor timestamps and any dropped frames.
+- [x] **Manual exposure:** AE off with fixed exposure times (1/1000 s to the longest allowed) and ISO values; check `CaptureResult` and image brightness to see whether they were honoured.
+- [x] **EV bracketing:** compensation at -2, 0 and +2 EV; confirm brightness changes and how many frames it takes to settle.
+- [x] **Processing modes:** capture with noise reduction and edge modes at off or minimal versus fast or high quality; save crops to compare.
+- [x] **Extensions:** one capture in each supported extension, saved as JPEG.
+- [x] **Ultra HDR:** one JPEG_R capture if supported.
 
 Output: a `report.json`, a readable `report.txt` summary and a folder of test images, all in Documents/A56Cam/diagnostics, with a Share button.
 
 **Done when:** the APK installs from the `latest` release, the report runs without crashing, and the owner has shared the report. **Stop here and wait.**
+
+Status (Oct 17, 2026): all Phase 0 code is written and CI builds it. Still open: signing secrets, merging to `main` so `latest` is published, and the owner running the report on the phone. The live tests are untested on the device until then.
 
 ### Phase 1: Basic camera
 
@@ -227,7 +229,8 @@ The biggest risk is that the finished app does not clearly beat Samsung's own ca
 Work one phase at a time, keep `main` always installable, and stop at every phase boundary for the owner to test on the phone.
 
 - Read `docs/PLAN.md` before each session and tick tasks off in it as they are completed.
-- Small commits with clear messages; push to `main` only when `./gradlew assembleDebug` succeeds in the Codespace.
+- Small commits with clear messages; push to `main` only when `./gradlew assembleDebug` succeeds in the Codespace (or, if the SDK cannot be installed there, when the GitHub Actions build passes on the branch).
+- Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/): `type(scope): summary`, with types `feat`, `fix`, `docs`, `build`, `ci`, `refactor`, `test`, `chore` and scopes such as `app`, `camera`, `processing`, `diagnostics`. Branch names use the same types: `feat/phase-1-basic-camera`, `fix/burst-timeout`, `docs/plan-update`.
 - Never commit build output, keystores, passwords or `local.properties`. Never ask the owner to paste credentials into a chat.
 - Never assume a camera feature exists: check `CameraCharacteristics` at runtime and degrade gracefully, logging what was missing.
 - All camera work on a dedicated background thread; never block the UI thread; close cameras and sessions in `onPause`.

@@ -1,0 +1,21 @@
+# Build output — never committed
+build/
+.gradle/
+.kotlin/
+.cxx/
+.externalNativeBuild/
+captures/
+*.apk
+*.aab
+*.ap_
+
+# Local machine config
+local.properties
+.idea/
+*.iml
+
+# Signing material — never committed
+*.jks
+*.keystore
+keystore.properties
+signing/
