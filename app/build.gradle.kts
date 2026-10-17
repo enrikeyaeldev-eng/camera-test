@@ -4,6 +4,7 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// Add comment after secrets set just to rebuild
 // CI passes the run number so every build installs over the previous one.
 val ciVersionCode = System.getenv("VERSION_CODE")?.toIntOrNull() ?: 1
 
