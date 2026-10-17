@@ -210,36 +210,44 @@ Status (Oct 17, 2026): built and passing CI (with unit tests for orientation, ta
 
 ### Phase 3: Burst stacking, first version
 
-- [ ] Frame ring buffer in native memory, fed by a repeating full-size YUV request, so frames from just before the shutter press can be used.
-- [ ] On shutter: lock AE and AWB, take N frames (start with 8), underexposed by about 1 EV to protect highlights.
-- [ ] Pick the sharpest frame as reference, measured by gradient energy.
-- [ ] Align the others with a coarse-to-fine tile search on a luma pyramid, as in Google's published HDR+ approach.
-- [ ] Merge with a robust per-tile weighted average that rejects tiles that moved.
-- [ ] Tone map to lift shadows back, light sharpening, save a 16-bit TIFF plus a JPEG.
-- [ ] Debug mode that saves the source frames and an alignment overlay.
+- [ ] Frame ring buffer in native memory, fed by a repeating full-size YUV request, so frames from just before the shutter press can be used. *Deferred:* frames are captured after the press instead. Pre-press frames would be at auto exposure, not the darker, locked exposure the merge needs, and copying 30 full frames a second costs heat. Revisit once results are judged.
+- [x] On shutter: lock AE and AWB, take N frames (start with 8), underexposed by about 1 EV to protect highlights. (Manual exposure per frame, from the preview's auto exposure; camera NR and sharpening off.)
+- [x] Pick the sharpest frame as reference, measured by gradient energy. (Noise-floor-corrected, weaker-direction, 75th-percentile block energy, so noise and a single moving object don't decide.)
+- [x] Align the others with a coarse-to-fine tile search on a luma pyramid, as in Google's published HDR+ approach. (5 levels, 16 px tiles, parent and neighbour candidates; integer-pixel.)
+- [x] Merge with a robust per-tile weighted average that rejects tiles that moved. (32 px tiles with sin² overlap; weight from mismatch vs. the median noise level.)
+- [x] Tone map to lift shadows back, light sharpening, save a 16-bit TIFF plus a JPEG.
+- [x] Debug mode that saves the source frames and an alignment overlay. (Merge map PNG: green = merged, red = rejected as moved; stats in Documents/A56Cam/debug.)
 
 **Done when:** side-by-side with a single frame, the stacked image has visibly less shadow noise with no ghosting on still scenes, and processing takes under about 5 seconds.
 
+Status (Oct 17, 2026): built, waiting for the owner's phone test. Host tests on synthetic frames: hand-shake recovered exactly up to 40 px, noise 8.0 → 2.7 with 8 frames (√8 predicts 2.8), no ghost from a moving object. Processing 8 × 12.5 MP takes 1.9 s on a 4-core desktop; on the phone it is measured in the logs (`alignMs`, `mergeMs`). Owner feedback before stacking: our single-frame colour is preferred to Samsung's, Samsung's noise reduction is better; stacking is the answer to that.
+
 ### Phase 4: Night and HDR modes of our own
 
-- [ ] Night: more frames (12 to 20), longer exposures if Phase 0 shows manual exposure works, motion-aware frame rejection.
-- [ ] HDR: bracketed frames merged with exposure fusion.
-- [ ] Linear DNG writer for Lightroom; Ultra HDR JPEG if supported.
+- [x] Night: more frames (12 to 20), longer exposures if Phase 0 shows manual exposure works, motion-aware frame rejection. (8/12/16 frames, up to 1/10 s at the lowest ISO that keeps -0.5 EV; frames under 70 % of the sharpest are dropped.)
+- [x] HDR: bracketed frames merged with exposure fusion. (-2, 0, +1.5 EV; brightness-matched alignment; Mertens fusion on a Laplacian pyramid.)
+- [x] Linear DNG writer for Lightroom; Ultra HDR JPEG if supported. (LinearRaw DNG with sRGB colour matrix and BaselineExposure; Ultra HDR is not supported by the camera, per Phase 0.)
 
 **Done when:** in low light the result beats the single frame and is competitive with the stock Night mode on noise.
 
+Status (Oct 17, 2026): built, waiting for the owner's phone test.
+
 ### Phase 5: Polish
 
-- [ ] Manual focus, white balance and EV controls; grid; timer; volume-key shutter.
-- [ ] Background processing so the camera is ready for the next shot.
-- [ ] GPU acceleration of the merge if speed or heat is a problem.
+- [x] Manual focus, white balance and EV controls; grid; timer; volume-key shutter. (Volume, camera, Enter and media keys, so most Bluetooth remotes work too.)
+- [ ] Background processing so the camera is ready for the next shot. *Open:* the preview stays live while merging, but the shutter waits for the merge to finish.
+- [ ] GPU acceleration of the merge if speed or heat is a problem. *Not needed yet:* the merge is multithreaded C++; decide after phone timings.
+
+## Known issues
+
+- **Green photos with "High quality" noise reduction or sharpening (Photo mode).** One owner photo had green 19× blue and was 2.5 stops darker than a normal shot, with auto WB in EXIF. Samsung's HQ still path seems to skip white balance in some light. Every Photo-mode shot now logs AWB/colour metadata and the photo's mean RGB; the owner should take an HQ and an Off shot of the same scene and share the logs. Burst modes always request NR and edge Off, so they are not affected.
 
 ## Ideas for later (not scheduled)
 
 Raised by the owner on Oct 17, 2026. Consider them when planning each phase; neither changes Phases 1 to 3.
 
 - **Video recording.** The roadmap is stills-only so far. Phase 0 shows 1280 × 720 high-speed video up to 240 fps on the back main camera, no video stabilisation mode (OIS only), and full-size YUV at 30 fps. A basic video mode (MediaRecorder or MediaCodec on a Camera2 session, with the same AE/AWB locks) fits naturally after Phase 1. Stacked or denoised video is a much larger project.
-- **Bluetooth remote shutter.** Most cheap Bluetooth camera remotes act as a keyboard or media button and send volume-up or Enter. They would then work through the same key handling as the Phase 5 volume-key shutter, with no pairing code in the app. Plan: in Phase 5, handle `KEYCODE_VOLUME_UP/DOWN`, `KEYCODE_CAMERA`, `KEYCODE_ENTER` and media keys as the shutter, then test with the owner's remote. Only if a remote needs its own protocol: BLE (Bluetooth permissions, pairing UI), as a separate task.
+- **Bluetooth remote shutter.** Done through the Phase 5 key handling: volume, camera, Enter and media keys trigger the shutter, which covers remotes that act as a keyboard or media button. Still to test with the owner's remote. Only if a remote needs its own protocol: BLE (Bluetooth permissions, pairing UI), as a separate task.
 
 - **Moving to the CameraA56 repository.** The owner created `enrikeyaeldev-eng/CameraA56` as the follow-up home of this project. Work stays in `camera-test` until the app is finished, then the move is reconsidered. Moving needs the same four signing secrets re-added there from the owner's private keystore backup (never a new key), and the download link changes.
 
