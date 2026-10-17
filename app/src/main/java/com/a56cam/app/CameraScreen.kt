@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -74,6 +73,7 @@ fun CameraScreen(vm: CameraViewModel, deviceOrientation: () -> Int, onOpenSettin
     val mode by vm.mode.collectAsState()
     val settings by vm.settings.values.collectAsState()
     var manualOpen by rememberSaveable { mutableStateOf(false) }
+    var evOpen by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
     val lens = st.lens
 
@@ -94,14 +94,21 @@ fun CameraScreen(vm: CameraViewModel, deviceOrientation: () -> Int, onOpenSettin
                 vm.cycleTimer()
             }
             ChipText("Manual", manualOpen) { manualOpen = !manualOpen }
+            if (lens != null && lens.evStep > 0f && mode.burst == null) {
+                ChipText(String.format(Locale.US, "EV %+.1f", st.evIndex * lens.evStep), evOpen || st.evIndex != 0) { evOpen = !evOpen }
+            }
             ChipText("AE lock", st.aeLock, enabled = lens?.aeLockAvailable == true) { vm.controller.setAeLock(!st.aeLock) }
             ChipText("WB lock", st.awbLock, enabled = lens?.awbLockAvailable == true) { vm.controller.setAwbLock(!st.awbLock) }
         }
 
-        // Preview, exactly the shape of the photo (4:3 portrait on this phone).
+        // Preview, exactly the shape of the photo (4:3 portrait on this phone). It takes the space left over,
+        // so the controls below always keep their full size.
+        Box(
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            contentAlignment = Alignment.TopCenter,
+        ) {
         Box(
             modifier = Modifier
-                .fillMaxWidth()
                 .aspectRatio(if (lens != null) lens.previewSize.height.toFloat() / lens.previewSize.width else 0.75f),
         ) {
             if (lens != null) {
@@ -134,12 +141,51 @@ fun CameraScreen(vm: CameraViewModel, deviceOrientation: () -> Int, onOpenSettin
                     }
                 }
             }
+            if (st.focusPoint != null) {
+                Text(
+                    "FOCUS POINT  ✕",
+                    color = Color.Black,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 8.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Accent)
+                        .clickable { vm.controller.resetFocus() }
+                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                )
+            }
+            // Lens choice for the current side, on the preview (e.g. 0.6x and 1x on the back).
+            val sameSide = st.lenses.filter { it.front == lens?.front }
+            if (sameSide.size > 1) {
+                Row(
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp)
+                        .clip(RoundedCornerShape(20.dp)).background(Color(0x66000000)).padding(4.dp),
+                ) {
+                    sameSide.forEach { l ->
+                        val selected = l.id == lens?.id
+                        Text(
+                            l.zoomLabel,
+                            color = if (selected) Accent else Color.White,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                            fontSize = 13.sp,
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(if (selected) Color(0x99000000) else Color.Transparent)
+                                .clickable(enabled = !photo.busy) { vm.selectLens(l.id) }
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                        )
+                    }
+                }
+            }
+        }
         }
 
         if (manualOpen && lens != null) ManualControls(vm.controller, st, lens)
 
         // Exposure compensation (not used by burst modes, which set their own exposure).
-        if (lens != null && lens.evStep > 0f && lens.evMax > lens.evMin && mode.burst == null) {
+        if (lens != null && lens.evStep > 0f && lens.evMax > lens.evMin && mode.burst == null && (evOpen || st.focusPoint != null)) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -160,41 +206,8 @@ fun CameraScreen(vm: CameraViewModel, deviceOrientation: () -> Int, onOpenSettin
                 )
             }
         }
-        if (st.focusPoint != null) {
-            Text(
-                "Focus and exposure set by tap. Long-press the preview or tap here for auto.",
-                color = Accent,
-                fontSize = 12.sp,
-                modifier = Modifier.padding(horizontal = 16.dp).clickable { vm.controller.resetFocus() },
-            )
-        }
-
-        Spacer(Modifier.weight(1f))
-
-        // Lens choice for the current side (e.g. 0.6x and 1x on the back).
-        val sameSide = st.lenses.filter { it.front == lens?.front }
-        if (sameSide.size > 1) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                sameSide.forEach { l ->
-                    val selected = l.id == lens?.id
-                    Text(
-                        l.zoomLabel,
-                        color = if (selected) Color.Black else Color.White,
-                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
-                        modifier = Modifier
-                            .padding(horizontal = 6.dp)
-                            .clip(CircleShape)
-                            .background(if (selected) Accent else Chip)
-                            .clickable(enabled = !photo.busy) { vm.selectLens(l.id) }
-                            .padding(horizontal = 14.dp, vertical = 8.dp),
-                    )
-                }
-            }
-            Spacer(Modifier.height(10.dp))
-        }
-
         // Capture mode.
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+        Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.Center) {
             CaptureMode.entries.forEach { m ->
                 val available = m.burst == null || lens?.yuvSize != null
                 val selected = m == mode
