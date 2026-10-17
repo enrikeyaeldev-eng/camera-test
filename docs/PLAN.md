@@ -236,6 +236,8 @@ Raised by the owner on Oct 17, 2026. Consider them when planning each phase; nei
 - **Video recording.** The roadmap is stills-only so far. Phase 0 shows 1280 × 720 high-speed video up to 240 fps on the back main camera, no video stabilisation mode (OIS only), and full-size YUV at 30 fps. A basic video mode (MediaRecorder or MediaCodec on a Camera2 session, with the same AE/AWB locks) fits naturally after Phase 1. Stacked or denoised video is a much larger project.
 - **Bluetooth remote shutter.** Most cheap Bluetooth camera remotes act as a keyboard or media button and send volume-up or Enter. They would then work through the same key handling as the Phase 5 volume-key shutter, with no pairing code in the app. Plan: in Phase 5, handle `KEYCODE_VOLUME_UP/DOWN`, `KEYCODE_CAMERA`, `KEYCODE_ENTER` and media keys as the shutter, then test with the owner's remote. Only if a remote needs its own protocol: BLE (Bluetooth permissions, pairing UI), as a separate task.
 
+- **Moving to the CameraA56 repository.** The owner created `enrikeyaeldev-eng/CameraA56` as the follow-up home of this project. Work stays in `camera-test` until the app is finished, then the move is reconsidered. Moving needs the same four signing secrets re-added there from the owner's private keystore backup (never a new key), and the download link changes.
+
 ## Risks, effort and skills
 
 The biggest risk is that the finished app does not clearly beat Samsung's own camera, which processes the sensor's RAW data internally. Realistic wins are less noise in dim scenes, a less oversharpened look, and files with more headroom for Lightroom.
