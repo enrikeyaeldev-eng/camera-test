@@ -44,9 +44,9 @@ object LensCatalog {
             }
         }
         // Main camera of each side: the one with the largest sensor (ties keep list order).
-        fun mainOf(front: Boolean) = raw.filter { it.front == front }.maxByOrNull { it.sensorArea }
+        fun mainOf(front: Boolean) = raw.filter { it.info.front == front }.maxByOrNull { it.sensorArea }
         val lenses = raw.map { r ->
-            val main = mainOf(r.front)
+            val main = mainOf(r.info.front)
             r.info.copy(zoomLabel = CameraMath.zoomLabel(r.info.equivalentFocalMm, main?.info?.equivalentFocalMm ?: 0f))
         }
         val mainBack = mainOf(false)?.info?.id
