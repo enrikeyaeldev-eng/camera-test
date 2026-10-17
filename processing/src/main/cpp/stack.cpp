@@ -522,7 +522,7 @@ void Stack::mergeRobust(const Alignment& al, const std::vector<int>& rejected, S
     st.tilesX = mtx;
     st.tilesY = mty;
     auto shiftOf = [&](int i) {
-        return [&al, i, S](int tx, int ty) { return al.at(i, tx * S, ty * S); };
+        return [&al, i](int tx, int ty) { return al.at(i, tx * kMergeStep, ty * kMergeStep); };
     };
 
     // Per tile and frame: robust weight from the mismatch with the reference, relative to the noise level.
@@ -610,7 +610,7 @@ void Stack::fuseExposures(const Alignment& al, StackStats& st) {
 
     std::vector<Img> ys(n), vs(n), us(n), ws(n);
     parallelFor(n, [&](int i) {
-        auto shiftOf = [&al, i, S](int tx, int ty) { return al.at(i, tx * S, ty * S); };
+        auto shiftOf = [&al, i](int tx, int ty) { return al.at(i, tx * kMergeStep, ty * kMergeStep); };
         Img y(W, H), wsum(W, H);
         accumulateLuma(frames_[i].y.data(), W, H, mtx, mty, shiftOf, one, y.p, wsum.p);
         for (size_t p = 0; p < y.p.size(); ++p) y.p[p] /= std::max(wsum.p[p], 1e-6f);
