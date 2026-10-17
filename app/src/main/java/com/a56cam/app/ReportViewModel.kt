@@ -23,7 +23,7 @@ data class UiState(
     val crashLogs: Int = 0,
 )
 
-class MainViewModel(app: Application) : AndroidViewModel(app) {
+class ReportViewModel(app: Application) : AndroidViewModel(app) {
 
     val version = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}, ${BuildConfig.BUILD_TYPE})"
 
