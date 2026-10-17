@@ -29,6 +29,12 @@ object BurstPlanner {
     /** Night exposures never go above this, so hand-held frames stay mostly sharp. */
     const val NIGHT_MAX_EXPOSURE_NS = 100_000_000L
 
+    /**
+     * Night lengthens the exposure only until the ISO is down to this; below it the extra noise saving is not
+     * worth the hand-shake blur. (A bright room picked 88 ms at ISO 40 and 6 of 16 selfie frames blurred.)
+     */
+    const val NIGHT_TARGET_ISO = 200
+
     fun plan(kind: Kind, autoExposureNs: Long, autoIso: Int, limits: Limits, frameCount: Int): Plan {
         val auto = autoExposureNs.toDouble() * autoIso
         return when (kind) {
@@ -37,11 +43,13 @@ object BurstPlanner {
                 val f = frameFor(auto * 0.5, autoExposureNs * 0.5, limits)
                 Plan(kind, List(frameCount) { f }, gain(auto, f), minSharpness = 0f)
             }
-            // Longest practical exposure at the lowest ISO that keeps half a stop under auto.
+            // Half a stop under auto, with the exposure lengthened (up to 100 ms) only as far as needed to bring the
+            // ISO down to NIGHT_TARGET_ISO; never shorter than auto.
             Kind.NIGHT -> {
                 val target = auto * 0.7071
                 val longest = minOf(limits.exposureMaxNs, NIGHT_MAX_EXPOSURE_NS).toDouble()
-                val f = frameFor(target, maxOf(autoExposureNs.toDouble(), longest), limits)
+                val wanted = (target / NIGHT_TARGET_ISO).coerceAtMost(longest)
+                val f = frameFor(target, maxOf(autoExposureNs.toDouble(), wanted), limits)
                 Plan(kind, List(frameCount) { f }, gain(auto, f), minSharpness = 0.7f)
             }
             // HDR+ style: identical frames 2 EV under auto so highlights are not clipped; merging them removes the

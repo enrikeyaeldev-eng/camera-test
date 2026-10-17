@@ -39,6 +39,23 @@ class BurstPlannerTest {
     }
 
     @Test
+    fun night_inARoomDoesNotUseLongHandheldExposures() {
+        // Front camera in a lit bathroom (owner's test): auto 25 ms at ISO 200.
+        val p = BurstPlanner.plan(Kind.NIGHT, 24_990_000, 200, a56, 16)
+        val f = p.frames[0]
+        assertEquals(24_990_000L, f.exposureNs)
+        assertTrue("iso ${f.iso}", f.iso in 140..142)
+    }
+
+    @Test
+    fun night_inDimLightStopsAtTargetIso() {
+        // auto 33.3 ms at ISO 800: 0.7071 × 33.3 ms × 800 / 200 ≈ 94 ms at ISO 200.
+        val f = BurstPlanner.plan(Kind.NIGHT, 33_320_000, 800, a56, 12).frames[0]
+        assertTrue("exposure ${f.exposureNs}", f.exposureNs in 93_000_000L..95_000_000L)
+        assertEquals(200, f.iso)
+    }
+
+    @Test
     fun hdr_isTwoStopsUnderWithGainFour() {
         val p = BurstPlanner.plan(Kind.HDR, 41_650_000, 1430, a56, 10)
         assertEquals(10, p.frames.size)

@@ -410,7 +410,8 @@ int main() {
         const double lampN = band(cn, W - 300, W - 100), lampB = band(cb, W - 300, W - 100);
         const double nearEdge = band(cb, W / 2 - 24, W / 2 - 8);
         std::printf("local tone: subject %.3f -> %.3f, lamp %.3f -> %.3f, subject near edge %.3f\n", subjectN, subjectB, lampN, lampB, nearEdge);
-        check(subjectB > subjectN + 0.05, "bright look lifts a dark subject next to a lamp", subjectB - subjectN);
+        // The bright look also sits a quarter stop under auto, so the net lift is small but must stay positive.
+        check(subjectB > subjectN + 0.01, "bright look lifts a dark subject next to a lamp", subjectB - subjectN);
         check(lampB < lampN - 0.02 && lampB > subjectB + 0.15, "bright look holds the lamp back, still brighter", lampN - lampB);
         check(std::fabs(nearEdge - subjectB) < 0.03, "no halo along the subject's edge", nearEdge - subjectB);
     }

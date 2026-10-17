@@ -864,11 +864,14 @@ constexpr int kLtmCell = 16;      // guide grid: 16 × 16 pixels per cell
 constexpr int kLtmRadius = 8;     // box radius in cells (≈ 270 px window)
 constexpr float kLtmEps = 0.15f;  // log2² units: edges stronger than ≈ 0.4 EV are kept sharp
 constexpr float kLogFloor = -10.f;
-// Bright look tuned against the Samsung camera on a backlit indoor portrait (lamp behind the subject):
-// shadows below 0.3 (linear, after gain) are lifted by 60 % of the distance in stops, up to 1 stop;
-// areas above 0.25 are held back by 80 %, at most by the burst's own headroom so clipped lamps stay white.
-constexpr float kLiftStrength = 0.6f, kShadowKey = 0.3f, kMaxLift = 1.0f;
-constexpr float kCutStrength = 0.8f, kHighlightKey = 0.25f;
+// Bright look tuned against the Samsung camera on a backlit and on a front-lit indoor selfie:
+// shadows below 0.3 (linear, after gain) are lifted by 40 % of the distance in stops, up to 1 stop;
+// areas above 0.45 are held back by 60 %, at most by the burst's own headroom so clipped lamps stay white.
+// Stronger settings made front-lit scenes flat and grey (walls darkened, faces over-lifted).
+constexpr float kLiftStrength = 0.4f, kShadowKey = 0.3f, kMaxLift = 1.0f;
+constexpr float kCutStrength = 0.6f, kHighlightKey = 0.45f;
+// The bright look sits a quarter stop under the burst's auto exposure; local lifting brightens faces again.
+constexpr float kBrightExposure = 0.8409f;
 // Global curve: linear up to the knee, then an exponential shoulder that reaches white at the gain.
 constexpr float kKnee = 0.4f;
 
@@ -1023,13 +1026,16 @@ Stack::Prepared Stack::prepare(const RenderParams& p) const {
     // input (x = gain) lands exactly on white; midtones stay linear instead of being darkened.
     prep.linMax = std::exp2(prep.maxLift);
     // Without headroom (gain 1) there is nothing to roll off: the knee moves to white and the curve is identity.
-    const float knee = kKnee + (1.f - kKnee) * std::min(1.f, std::max(0.f, (1.25f - gain) / 0.25f));
+    // The exposure bias only uses headroom the burst has, so a gain-1 render keeps white at white.
+    const float bias = bright ? std::max(kBrightExposure, 1.f / gain) : 1.f;
+    const float whiteIn = bias * gain;  // brightest input after gain and bias; it maps to white
+    const float knee = kKnee + (1.f - kKnee) * std::min(1.f, std::max(0.f, (1.25f - whiteIn) / 0.25f));
     const float shoulder = 1.f - knee;
-    const float shoulderNorm = shoulder > 1e-3f ? 1.f - std::exp(-(gain - knee) / shoulder) : 1.f;
+    const float shoulderNorm = shoulder > 1e-3f ? 1.f - std::exp(-(whiteIn - knee) / shoulder) : 1.f;
     prep.lut.resize(4096);
     for (size_t i = 0; i < prep.lut.size(); ++i) {
         const float f = static_cast<float>(i) / (prep.lut.size() - 1);
-        const float x = gain * prep.linMax * f * f;
+        const float x = bias * gain * prep.linMax * f * f;
         const float y = x < knee || shoulder <= 1e-3f ? x : knee + shoulder * (1.f - std::exp(-(x - knee) / shoulder)) / shoulderNorm;
         float t = srgbEncode(std::min(1.f, y));
         if (bright) {
@@ -1041,11 +1047,11 @@ Stack::Prepared Stack::prepare(const RenderParams& p) const {
         prep.lut[i] = t;
     }
     if (bright && !mergedV_.empty()) {
-        // Slightly less colour than the camera: the per-channel tone curve already adds saturation, and skin
-        // came out redder than on the Samsung camera.
-        prep.saturation = 0.92f;
-        // Grey-world estimate of the remaining colour cast from mid-grey, unsaturated pixels; half of it
-        // is removed, so warm light stays warm but not orange.
+        // Less colour than the camera: the per-channel tone curve and local lifting already add saturation,
+        // and skin came out redder than on the Samsung camera.
+        prep.saturation = 0.82f;
+        // White-patch estimate of the remaining colour cast from bright, nearly neutral pixels (white shirts,
+        // walls); 70 % of it is removed. Grey-world over a warm marble wall turned a white shirt blue.
         double sv = 0, su = 0;
         long n = 0;
         const int CW = width_ / 2, CH = height_ / 2;
@@ -1054,15 +1060,15 @@ Stack::Prepared Stack::prepare(const RenderParams& p) const {
                 const size_t c = static_cast<size_t>(y) * CW + x;
                 const float yy = mergedY_[static_cast<size_t>(2 * y) * width_ + 2 * x];
                 const float dv = mergedV_[c] - 128.f, du = mergedU_[c] - 128.f;
-                if (yy < 40.f || yy > 230.f || dv * dv + du * du > 30.f * 30.f) continue;
+                if (yy < 170.f || yy > 235.f || dv * dv + du * du > 12.f * 12.f) continue;
                 sv += dv;
                 su += du;
                 ++n;
             }
         }
         if (n > 100) {
-            prep.vShift = -0.5f * static_cast<float>(sv / n);
-            prep.uShift = -0.5f * static_cast<float>(su / n);
+            prep.vShift = -0.7f * static_cast<float>(sv / n);
+            prep.uShift = -0.7f * static_cast<float>(su / n);
         }
     }
     return prep;
