@@ -59,13 +59,13 @@ jobs:
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
           echo "KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
 
-      - name: Build debug and release APKs
+      - name: Unit tests, then debug and release APKs
         env:
           VERSION_CODE: ${{ github.run_number }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: ./gradlew --no-daemon assembleDebug assembleRelease
+        run: ./gradlew --no-daemon testDebugUnitTest assembleDebug assembleRelease
 
       - name: Collect APKs
         id: apks
