@@ -146,8 +146,8 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(if (state.running) "Running..." else "Run device report") }
             Text(
-                "Takes about 1 to 3 minutes. Point the back camera at a still, detailed scene, keep the phone steady, " +
-                    "and keep the app open until it finishes.",
+                "Tests every camera, front and back: about 5 to 8 minutes. Prop the phone up so both sides see a " +
+                    "still, detailed scene, keep it steady, and keep the app open until it finishes.",
                 style = MaterialTheme.typography.bodySmall,
             )
 

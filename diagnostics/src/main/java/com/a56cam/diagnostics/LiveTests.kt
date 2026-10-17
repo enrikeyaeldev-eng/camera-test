@@ -25,6 +25,8 @@ internal class LiveTests(
     private val cameraId: String,
     private val chars: CameraCharacteristics,
     private val outDir: File,
+    /** Prepended to every saved file name, e.g. "cam2_", so cameras do not overwrite each other. */
+    private val prefix: String,
     private val cameraThread: CameraThread,
     private val imageThread: CameraThread,
     private val errors: ErrorLog,
@@ -70,7 +72,7 @@ internal class LiveTests(
                 // A full-resolution reference frame, so the owner can judge Samsung's processing.
                 fullCopyRequested.set(true)
                 collectTag("burst-warm", 2, 3_000).firstNotNullOfOrNull { it.frame.full }?.let {
-                    errors.step("save full frame") { Yuv.saveJpeg(it, File(outDir, "burst_reference_full.jpg")) }
+                    errors.step("save full frame") { Yuv.saveJpeg(it, File(outDir, prefix + "burst_reference_full.jpg")) }
                 }
 
                 val variants = JSONArray()
@@ -231,7 +233,7 @@ internal class LiveTests(
             .put("lumaPerFrame", JSONArray(samples.map { round2(it.frame.meanLuma) }))
         last.frame.crop?.let {
             errors.step("save $tag") {
-                Yuv.saveJpeg(it, File(outDir, String.format(Locale.US, "manual_%dus_iso%d.jpg", exposureNs / 1000, iso)))
+                Yuv.saveJpeg(it, File(outDir, prefix + String.format(Locale.US, "manual_%dus_iso%d.jpg", exposureNs / 1000, iso)))
             }
         }
         return o
@@ -312,7 +314,7 @@ internal class LiveTests(
                             }))
                         samples.last().frame.crop?.let {
                             errors.step("save $tag") {
-                                Yuv.saveJpeg(it, File(outDir, String.format(Locale.US, "ev_%d_%+.0f.jpg", i, ev)))
+                                Yuv.saveJpeg(it, File(outDir, prefix + String.format(Locale.US, "ev_%d_%+.0f.jpg", i, ev)))
                             }
                         }
                     }
@@ -388,7 +390,7 @@ internal class LiveTests(
                             .put("iso", sample.get(CaptureResult.SENSOR_SENSITIVITY))
                             .put("meanLuma", round2(sample.frame.meanLuma))
                         sample.frame.crop?.let { crop ->
-                            val file = File(outDir, "modes_nr-${nrName}_edge-$edgeName.png")
+                            val file = File(outDir, prefix + "modes_nr-${nrName}_edge-$edgeName.png")
                             o.put("cropFile", file.name)
                                 .put("cropGradientEnergy", round2(Yuv.gradientEnergy(crop)))
                                 .put("cropLumaStdDev", round2(Yuv.lumaStdDev(crop)))

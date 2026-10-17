@@ -49,8 +49,25 @@ internal object ReportSummary {
         }
         appendLine()
 
-        val live = r.optJSONObject("liveTests") ?: JSONObject()
-        appendLine("== Live tests on camera ${live.optString("cameraId")} ==")
+        val byCamera = r.optJSONObject("liveTestsByCamera")
+        if (byCamera != null) {
+            for (id in byCamera.keys()) live(byCamera.getJSONObject(id))
+        } else {
+            live(r.optJSONObject("liveTests") ?: JSONObject())
+        }
+
+        val errs = r.optJSONArray("errors") ?: JSONArray()
+        if (errs.length() > 0) {
+            appendLine("== Errors ==")
+            for (i in 0 until errs.length()) {
+                val e = errs.getJSONObject(i)
+                appendLine("${e.optString("step")}: ${e.optString("error")}")
+            }
+        }
+    }
+
+    private fun StringBuilder.live(live: JSONObject) {
+        appendLine("== Live tests on camera ${live.optString("cameraId")} ${live.optString("lensFacing")} ==")
         val burst = live.optJSONObject("burst")
         appendLine("Burst at ${burst?.optString("size")} (advertised max ${burst?.opt("advertisedMaxFps")} fps):")
         val variants = burst?.optJSONArray("variants") ?: JSONArray()
@@ -58,6 +75,10 @@ internal object ReportSummary {
             val v = variants.getJSONObject(i)
             appendLine("  ${v.optString("variant")}: ${v.opt("fps")} fps, ${v.optInt("imagesReceived")}/${v.optInt("requested")} images, ${v.optInt("failures")} failures, max gap ${v.opt("maxIntervalMs")} ms")
         }
+
+        appendLine("  frame analysis (burst / manual / EV / modes): ${burst?.opt("frameStats")} / " +
+            "${live.optJSONObject("manualExposure")?.opt("frameStats")} / " +
+            "${live.optJSONObject("evBracketing")?.opt("frameStats")} / ${live.optJSONObject("processingModes")?.opt("frameStats")}")
 
         val me = live.optJSONObject("manualExposure")
         appendLine("Manual exposure: AE OFF offered=${me?.optBoolean("aeOffAdvertised")} " +
@@ -94,14 +115,6 @@ internal object ReportSummary {
         appendLine("Ultra HDR (JPEG_R): listed=${hdr?.opt("jpegRListed")} success=${hdr?.opt("success")} gain map=${hdr?.opt("hasGainMapXmp")}")
         appendLine()
 
-        val errs = r.optJSONArray("errors") ?: JSONArray()
-        if (errs.length() > 0) {
-            appendLine("== Errors ==")
-            for (i in 0 until errs.length()) {
-                val e = errs.getJSONObject(i)
-                appendLine("${e.optString("step")}: ${e.optString("error")}")
-            }
-        }
     }
 
     private fun list(a: JSONArray?): String =

@@ -36,6 +36,8 @@ internal class ExtensionTests(
     private val cameraId: String,
     private val chars: CameraCharacteristics,
     private val outDir: File,
+    /** Prepended to every saved file name, e.g. "cam2_", so cameras do not overwrite each other. */
+    private val prefix: String,
     private val cameraThread: CameraThread,
     private val imageThread: CameraThread,
     private val errors: ErrorLog,
@@ -129,7 +131,7 @@ internal class ExtensionTests(
                         ByteArray(buf.remaining()).also { buf.get(it) }
                     } else {
                         val nv21 = Yuv.copyNv21(img, android.graphics.Rect(0, 0, img.width, img.height))
-                        val tmp = File(outDir, "tmp_ext.jpg")
+                        val tmp = File(outDir, prefix + "tmp_ext.jpg")
                         Yuv.saveJpeg(nv21, tmp)
                         tmp.readBytes().also { tmp.delete() }
                     }
@@ -155,7 +157,7 @@ internal class ExtensionTests(
                 AppLog.e("Camera $cameraId extension $name: no image within 30 s")
                 o.put("success", false).put("error", "no image within 30 s")
             } else {
-                val file = File(outDir, "extension_$name.jpg")
+                val file = File(outDir, prefix + "extension_$name.jpg")
                 file.writeBytes(bytes)
                 o.put("success", true)
                     .put("latencyMs", SystemClock.elapsedRealtime() - start)
@@ -253,7 +255,7 @@ internal class ExtensionTests(
                 if (bytes == null) {
                     out.put("success", false).put("error", "no image within 10 s")
                 } else {
-                    File(outDir, "ultrahdr.jpg").writeBytes(bytes)
+                    File(outDir, prefix + "ultrahdr.jpg").writeBytes(bytes)
                     val text = String(bytes, Charsets.ISO_8859_1)
                     out.put("success", true)
                         .put("bytes", bytes.size)

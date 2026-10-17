@@ -42,7 +42,7 @@ class DiagnosticsRunner(private val context: Context) {
         val started = System.currentTimeMillis()
         AppLog.i("Diagnostics run started: ${runDir.absolutePath}")
 
-        report.put("schema", 1)
+        report.put("schema", 2)
         report.put("app", JSONObject().put("version", appVersion))
         report.put("startedAt", stamp)
         report.put("device", deviceInfo())
@@ -65,34 +65,20 @@ class DiagnosticsRunner(private val context: Context) {
                             CameraCharacteristics.LENS_FACING_BACK
                     } == true
                 }
-                val live = JSONObject()
-                if (backId == null) {
-                    AppLog.e("No back camera found in $ids; live tests skipped")
-                    live.put("skipped", "no back camera")
-                } else {
-                    live.put("cameraId", backId)
-                    val chars = manager.getCameraCharacteristics(backId)
-                    val tests = LiveTests(manager, backId, chars, runDir, cameraThread, imageThread, errors)
-                    val ext = ExtensionTests(manager, backId, chars, runDir, cameraThread, imageThread, errors)
-                    if (tests.hasYuv()) {
-                        progress("Live test 1/6: burst speed")
-                        live.put("burst", tests.burstSpeed())
-                        progress("Live test 2/6: manual exposure (long exposures take a while)")
-                        live.put("manualExposure", tests.manualExposure())
-                        progress("Live test 3/6: EV bracketing")
-                        live.put("evBracketing", tests.evBracketing())
-                        progress("Live test 4/6: noise-reduction and edge modes")
-                        live.put("processingModes", tests.processingModes())
-                    } else {
-                        AppLog.e("Camera $backId has no YUV_420_888 output; YUV tests skipped")
-                        live.put("yuvTestsSkipped", "no YUV_420_888 output")
-                    }
-                    progress("Live test 5/6: Camera Extensions")
-                    live.put("extensions", ext.extensions())
-                    progress("Live test 6/6: Ultra HDR")
-                    live.put("ultraHdr", ext.ultraHdr())
+                // Main back camera first (it decides the roadmap), then every other listed camera.
+                val order = listOfNotNull(backId) + ids.filter { it != backId }
+                if (backId == null) AppLog.e("No back camera found in $ids")
+                val all = JSONObject()
+                for ((index, id) in order.withIndex()) {
+                    val label = "camera $id (${index + 1}/${order.size})"
+                    val live = errors.step("live tests $id") {
+                        liveTests(manager, id, runDir, cameraThread, imageThread, errors) { progress("$label: $it") }
+                    } ?: JSONObject().put("error", "live tests failed to start")
+                    all.put(id, live)
                 }
-                report.put("liveTests", live)
+                // "liveTests" keeps the main back camera at the top level, as in report schema 1.
+                report.put("liveTests", backId?.let { all.optJSONObject(it) } ?: JSONObject().put("skipped", "no back camera"))
+                report.put("liveTestsByCamera", all)
             }
         }
 
@@ -106,6 +92,42 @@ class DiagnosticsRunner(private val context: Context) {
         val exported = exportToDocuments(runDir)
         AppLog.i("Diagnostics run finished in ${report.getLong("durationMs")} ms, ${errors.entries.length()} errors")
         DiagnosticsResult(runDir, json, txt, exported, summary)
+    }
+
+    private suspend fun liveTests(
+        manager: CameraManager,
+        id: String,
+        runDir: File,
+        cameraThread: CameraThread,
+        imageThread: CameraThread,
+        errors: ErrorLog,
+        progress: (String) -> Unit,
+    ): JSONObject {
+        val live = JSONObject().put("cameraId", id)
+        val chars = manager.getCameraCharacteristics(id)
+        live.put("lensFacing", com.a56cam.camera.CameraNames.name(
+            com.a56cam.camera.CameraNames.lensFacing, chars.get(CameraCharacteristics.LENS_FACING)))
+        val prefix = "cam${id}_"
+        val tests = LiveTests(manager, id, chars, runDir, prefix, cameraThread, imageThread, errors)
+        val ext = ExtensionTests(manager, id, chars, runDir, prefix, cameraThread, imageThread, errors)
+        if (tests.hasYuv()) {
+            progress("burst speed")
+            live.put("burst", tests.burstSpeed())
+            progress("manual exposure")
+            live.put("manualExposure", tests.manualExposure())
+            progress("EV bracketing")
+            live.put("evBracketing", tests.evBracketing())
+            progress("noise-reduction and edge modes")
+            live.put("processingModes", tests.processingModes())
+        } else {
+            AppLog.e("Camera $id has no YUV_420_888 output; YUV tests skipped")
+            live.put("yuvTestsSkipped", "no YUV_420_888 output")
+        }
+        progress("Camera Extensions")
+        live.put("extensions", ext.extensions())
+        progress("Ultra HDR")
+        live.put("ultraHdr", ext.ultraHdr())
+        return live
     }
 
     private fun deviceInfo(): JSONObject = JSONObject()
